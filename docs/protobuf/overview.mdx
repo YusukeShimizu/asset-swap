@@ -1,0 +1,30 @@
+---
+title: Protobuf Overview
+description: Where schemas live and how they are managed with Buf.
+---
+
+## Source of truth
+
+All Protobuf schemas live in `proto/`.
+
+- Buf module configuration: `buf.yaml`
+- Dependency lockfile: `buf.lock` (generated via `buf dep update`)
+
+## Dependencies
+
+This template uses:
+
+- Google API annotations (HTTP transcoding, field behaviors, resource descriptors): `googleapis/googleapis`
+- Validation annotations: `bufbuild/protovalidate`
+
+## Example API
+
+This template includes a small example API at `proto/template/v1/greetings.proto`.
+It is designed to be replaced with your project's real resources and services, but it demonstrates:
+
+- Resource naming (`name`) and `google.api.resource` annotations
+- Standard methods (Get/List/Create/Update/Delete)
+- HTTP JSON transcoding (`google.api.http`)
+- Request validation using Protovalidate (`buf.validate.*`)
+
+Next: [Resource-oriented design (AIP)](/protobuf/resource-oriented)

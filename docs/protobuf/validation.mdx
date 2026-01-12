@@ -1,0 +1,32 @@
+---
+title: Protovalidate
+description: How to add validation rules to request and resource messages.
+---
+
+This repository uses Protovalidate annotations (not `protoc-gen-validate`).
+
+Protovalidate adds schema-level validation rules that are enforced at runtime by language-specific libraries.
+
+## When to validate
+
+Use validation rules primarily on:
+
+- Request messages (for API inputs)
+- Fields that must be well-formed (IDs, resource names, pagination values)
+
+Avoid "over-validating" output-only fields. If a field is output-only, consider skipping validation when it is unset:
+
+```proto
+string name = 1 [
+  (google.api.field_behavior) = OUTPUT_ONLY,
+  (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+  (buf.validate.field).string.pattern = "^greetings/[A-Za-z0-9][A-Za-z0-9-]{0,62}$"
+];
+```
+
+## REQUIRED vs validation
+
+`(google.api.field_behavior) = REQUIRED` is an API contract signal.
+`(buf.validate.field).required = true` enforces a runtime validation rule.
+
+In most APIs, you want both for required input fields.

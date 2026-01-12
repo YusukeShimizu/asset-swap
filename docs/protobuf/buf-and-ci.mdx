@@ -1,0 +1,32 @@
+---
+title: Buf and CI Checks
+description: How Buf, documentation linting, and CI are wired together.
+---
+
+## Buf workflow
+
+This template uses Buf for:
+
+- Formatting: `buf format`
+- Linting: `buf lint`
+- Dependency pinning: `buf dep update` (writes `buf.lock`)
+
+## CI integration
+
+CI runs the same commands as local development.
+
+Recommended locally (direnv):
+
+```sh
+direnv allow
+just ci
+```
+
+CI (and without direnv):
+
+```sh
+nix develop -c just ci
+```
+
+If you change Protobuf schemas, ensure `buf lint` passes.
+If you change documentation, ensure the documentation linters and link checks pass.

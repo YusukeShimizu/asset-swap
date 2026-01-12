@@ -1,0 +1,54 @@
+---
+title: Resource-Oriented Design (AIP)
+description: How to design Protobuf APIs that follow https://google.aip.dev/.
+---
+
+This repository follows Google's API Improvement Proposals (AIP) and uses a resource-oriented design.
+
+## Key concepts
+
+- A **resource** is an addressable entity with a stable `name` string.
+- A **collection** is a group of resources of the same type.
+- Standard methods should be preferred over custom RPCs.
+
+## Resource names
+
+Use a canonical resource name in every resource message:
+
+- Field name: `name`
+- Type: `string`
+- Semantics: opaque identifier (clients must not parse it)
+
+Annotate resources with `google.api.resource` so tools can understand patterns and types.
+
+## Standard methods
+
+Prefer the standard method shapes:
+
+- `Get{Resource}`
+- `List{Resources}`
+- `Create{Resource}`
+- `Update{Resource}`
+- `Delete{Resource}`
+
+Each method should have an explicit request message, even if it only contains one field.
+
+## HTTP JSON transcoding
+
+Define REST mappings using `google.api.http`:
+
+- `GET /v1/{name=...}` for Get
+- `GET /v1/...` for List
+- `POST /v1/...` for Create (with `body`)
+- `PATCH /v1/{resource.name=...}` for Update (with `body`)
+- `DELETE /v1/{name=...}` for Delete
+
+## Errors
+
+Document error behavior for every RPC:
+
+- Which status codes can be returned (`INVALID_ARGUMENT`, `NOT_FOUND`, `ALREADY_EXISTS`, ...)
+- What causes each error (validation failure, missing resource, conflicting ID, ...)
+- Any special cautions (output-only fields, pagination limits, update masks)
+
+See the example in `proto/template/v1/greetings.proto`.

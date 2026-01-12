@@ -1,0 +1,35 @@
+---
+title: Introduction
+description: How this repository structures docs, Protobuf schemas, and CI checks.
+---
+
+This repository keeps all documentation content under `docs/` so it can be deployed with Mintlify.
+The site configuration lives in `docs/docs.json`.
+
+## Protobuf
+
+Protobuf schemas are managed with Buf and follow Google's API Improvement Proposals (AIP) with a resource-oriented design.
+
+- Start here: [Protobuf overview](/protobuf/overview)
+- Design guidelines: [Resource-oriented design (AIP)](/protobuf/resource-oriented)
+- Validation annotations: [Protovalidate](/protobuf/validation)
+- Tooling and CI: [Buf and CI checks](/protobuf/buf-and-ci)
+
+## CI checks
+
+CI runs the same quality gates as local development.
+
+Recommended locally (direnv):
+
+```sh
+direnv allow
+just ci
+```
+
+CI (and without direnv):
+
+```sh
+nix develop -c just ci
+```
+
+If you update documentation, run the documentation checks locally before opening a PR.

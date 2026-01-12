@@ -1,0 +1,26 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "theme": "mint",
+  "name": "Rust Template",
+  "description": "Template repository documentation (Buf + AIP + Protovalidate).",
+  "colors": {
+    "primary": "#3B82F6"
+  },
+  "navigation": {
+    "groups": [
+      {
+        "group": "Getting Started",
+        "pages": ["index"]
+      },
+      {
+        "group": "Protobuf",
+        "pages": [
+          "protobuf/overview",
+          "protobuf/resource-oriented",
+          "protobuf/validation",
+          "protobuf/buf-and-ci"
+        ]
+      }
+    ]
+  }
+}

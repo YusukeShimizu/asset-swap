@@ -1,0 +1,24 @@
+/target
+/.direnv/
+/result
+/result-*
+
+# direnv local overrides (secrets etc.)
+.envrc.local
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# Node / Mintlify
+node_modules/
+docs/.mintlify/
+
+# Vale (cache)
+.vale/
+
+# Vale packages (downloaded by `vale sync`)
+docs/styles/*
+!docs/styles/config/
+!docs/styles/config/**

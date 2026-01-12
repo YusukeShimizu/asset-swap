@@ -1,0 +1,237 @@
+syntax = "proto3";
+
+package template.v1;
+
+import "buf/validate/validate.proto";
+import "google/api/annotations.proto";
+import "google/api/client.proto";
+import "google/api/field_behavior.proto";
+import "google/api/resource.proto";
+import "google/protobuf/empty.proto";
+import "google/protobuf/field_mask.proto";
+import "google/protobuf/timestamp.proto";
+
+// This file demonstrates a "resource-oriented" API design that follows Google AIP:
+// - https://google.aip.dev/
+//
+// It also demonstrates request validation using Protovalidate:
+// - https://github.com/bufbuild/protovalidate
+//
+// The API surface is intentionally small and domain-agnostic so it can act as a
+// template. Replace the resource and service names with your own project terms.
+
+// GreetingService provides standard CRUD-style methods for the Greeting resource.
+//
+// Resource-oriented design principles applied here:
+// - Resources are identified by a canonical `name` string.
+// - Standard methods are used where possible: Get/List/Create/Update/Delete.
+// - Requests/Responses are explicit message types.
+// - HTTP JSON transcoding is defined via `google.api.http`.
+service GreetingService {
+  option (google.api.default_host) = "template.example.com";
+
+  // Gets a single Greeting by resource name.
+  //
+  // Errors:
+  // - `INVALID_ARGUMENT` if `name` is malformed.
+  // - `NOT_FOUND` if the Greeting does not exist.
+  rpc GetGreeting(GetGreetingRequest) returns (Greeting) {
+    option (google.api.http) = {get: "/v1/{name=greetings/*}"};
+    option (google.api.method_signature) = "name";
+  }
+
+  // Lists Greetings in the top-level collection.
+  //
+  // Pagination:
+  // - If `page_size` is 0, the server selects a default size.
+  // - If `page_size` exceeds the server maximum, the server clamps it.
+  //
+  // Errors:
+  // - `INVALID_ARGUMENT` if `page_size` is negative.
+  rpc ListGreetings(ListGreetingsRequest) returns (ListGreetingsResponse) {
+    option (google.api.http) = {get: "/v1/greetings"};
+  }
+
+  // Creates a new Greeting.
+  //
+  // Notes:
+  // - `greeting_id` is optional. If omitted, the server generates an ID.
+  // - `greeting.name` is output-only and ignored if set by the client.
+  //
+  // Errors:
+  // - `INVALID_ARGUMENT` if the request is malformed or fails validation.
+  // - `ALREADY_EXISTS` if `greeting_id` is provided and already exists.
+  rpc CreateGreeting(CreateGreetingRequest) returns (Greeting) {
+    option (google.api.http) = {
+      post: "/v1/greetings"
+      body: "greeting"
+    };
+    option (google.api.method_signature) = "greeting";
+  }
+
+  // Updates an existing Greeting.
+  //
+  // Notes:
+  // - `greeting.name` identifies which resource to update.
+  // - `update_mask` controls which fields are updated.
+  // - Clients should not attempt to update output-only fields.
+  //
+  // Errors:
+  // - `INVALID_ARGUMENT` if the request is malformed or `update_mask` is invalid.
+  // - `NOT_FOUND` if the Greeting does not exist.
+  rpc UpdateGreeting(UpdateGreetingRequest) returns (Greeting) {
+    option (google.api.http) = {
+      patch: "/v1/{greeting.name=greetings/*}"
+      body: "greeting"
+    };
+    option (google.api.method_signature) = "greeting,update_mask";
+  }
+
+  // Deletes a Greeting.
+  //
+  // Errors:
+  // - `INVALID_ARGUMENT` if `name` is malformed.
+  // - `NOT_FOUND` if the Greeting does not exist.
+  rpc DeleteGreeting(DeleteGreetingRequest) returns (google.protobuf.Empty) {
+    option (google.api.http) = {delete: "/v1/{name=greetings/*}"};
+    option (google.api.method_signature) = "name";
+  }
+}
+
+// A Greeting is a simple resource containing a free-form greeting message.
+message Greeting {
+  option (google.api.resource) = {
+    type: "template.googleapis.com/Greeting"
+    pattern: "greetings/{greeting}"
+  };
+
+  // The resource name of the Greeting.
+  //
+  // Format:
+  // - `greetings/{greeting}`
+  //
+  // Output only. Clients must treat this value as opaque and MUST NOT parse it.
+  string name = 1 [
+    (google.api.field_behavior) = OUTPUT_ONLY,
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.pattern = "^greetings/[A-Za-z0-9][A-Za-z0-9-]{0,62}$"
+  ];
+
+  // The human-readable greeting message.
+  //
+  // Required on Create/Update.
+  string message = 2 [
+    (google.api.field_behavior) = REQUIRED,
+    (buf.validate.field).required = true,
+    (buf.validate.field).string.min_len = 1,
+    (buf.validate.field).string.max_len = 256
+  ];
+
+  // The time the Greeting was created.
+  //
+  // Output only.
+  google.protobuf.Timestamp create_time = 3 [(google.api.field_behavior) = OUTPUT_ONLY];
+}
+
+message GetGreetingRequest {
+  // The resource name of the Greeting to retrieve.
+  //
+  // Format:
+  // - `greetings/{greeting}`
+  string name = 1 [
+    (google.api.field_behavior) = REQUIRED,
+    (google.api.resource_reference) = {type: "template.googleapis.com/Greeting"},
+    (buf.validate.field).required = true,
+    (buf.validate.field).string.pattern = "^greetings/[A-Za-z0-9][A-Za-z0-9-]{0,62}$"
+  ];
+}
+
+message ListGreetingsRequest {
+  // The maximum number of Greetings to return.
+  //
+  // If this value is 0, the server selects a default.
+  int32 page_size = 1 [
+    (buf.validate.field).int32.gte = 0,
+    (buf.validate.field).int32.lte = 1000
+  ];
+
+  // A page token, received from a previous `ListGreetings` call.
+  string page_token = 2 [(buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE];
+
+  // Optional filter expression.
+  //
+  // Caution:
+  // - Filter semantics are API-specific and MUST be documented if supported.
+  // - Servers SHOULD reject unknown filter fields with `INVALID_ARGUMENT`.
+  string filter = 3 [(buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE];
+
+  // Optional sort order.
+  //
+  // Caution:
+  // - Servers SHOULD document supported fields and ordering semantics.
+  string order_by = 4 [(buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE];
+}
+
+message ListGreetingsResponse {
+  // The list of Greetings.
+  repeated Greeting greetings = 1;
+
+  // A token that can be sent as `page_token` to retrieve the next page.
+  string next_page_token = 2;
+}
+
+message CreateGreetingRequest {
+  // The Greeting to create.
+  //
+  // Required.
+  Greeting greeting = 1 [
+    (google.api.field_behavior) = REQUIRED,
+    (buf.validate.field).required = true
+  ];
+
+  // The client-provided ID to use for the Greeting.
+  //
+  // If provided, this becomes the final segment of the resource name:
+  // - `greetings/{greeting}`
+  //
+  // If omitted, the server generates an ID.
+  //
+  // Errors:
+  // - `ALREADY_EXISTS` if the requested ID is already in use.
+  string greeting_id = 2 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.pattern = "^[a-z][a-z0-9-]{0,62}$"
+  ];
+}
+
+message UpdateGreetingRequest {
+  // The Greeting to update.
+  //
+  // Required. The `greeting.name` field identifies which resource to update.
+  Greeting greeting = 1 [
+    (google.api.field_behavior) = REQUIRED,
+    (buf.validate.field).required = true
+  ];
+
+  // The list of fields to update.
+  //
+  // Required for update methods. The server MUST ignore paths that are
+  // output-only, and SHOULD reject attempts to update them with `INVALID_ARGUMENT`.
+  google.protobuf.FieldMask update_mask = 2 [
+    (google.api.field_behavior) = REQUIRED,
+    (buf.validate.field).required = true
+  ];
+}
+
+message DeleteGreetingRequest {
+  // The resource name of the Greeting to delete.
+  //
+  // Format:
+  // - `greetings/{greeting}`
+  string name = 1 [
+    (google.api.field_behavior) = REQUIRED,
+    (google.api.resource_reference) = {type: "template.googleapis.com/Greeting"},
+    (buf.validate.field).required = true,
+    (buf.validate.field).string.pattern = "^greetings/[A-Za-z0-9][A-Za-z0-9-]{0,62}$"
+  ];
+}
