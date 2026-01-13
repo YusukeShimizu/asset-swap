@@ -137,6 +137,23 @@ operational principle
 ```
 
 ```text
+concept LwkLiquidRegtestE2E
+purpose
+    LWK と elementsd/electrs を実際に起動し、Liquid regtest 上でアセット発行と送受信を検証する。
+state
+    elementsd: string
+    electrs_liquid: string
+    test_file: string
+actions
+    run [ ]
+        => [ ok: boolean ]
+        run `cargo test --test lwk_liquid_regtest_e2e -- --ignored --nocapture`
+operational principle
+    after run [ ]
+        => [ ok: true ]
+```
+
+```text
 concept Protobuf
 purpose
     Protobuf スキーマを Buf で管理する。
@@ -211,4 +228,13 @@ when {
         => [] }
 then {
     LdkServerRegtestE2E/run: [ ] }
+```
+
+```text
+sync LWK_E2E
+when {
+    Shell/request: [ command: "just lwk_e2e" ]
+        => [] }
+then {
+    LwkLiquidRegtestE2E/run: [ ] }
 ```

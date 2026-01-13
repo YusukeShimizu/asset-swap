@@ -77,6 +77,40 @@
 
           doCheck = false;
         };
+
+        electrsLiquid = pkgs.rustPlatform.buildRustPackage rec {
+          pname = "electrs-liquid";
+          version = "0.4.1-e60ca89";
+
+          src = pkgs.fetchFromGitHub {
+            owner = "blockstream";
+            repo = "electrs";
+            rev = "e60ca890959b2cb9b62d5253ffa0cf4b25b144eb";
+            hash = "sha256-2z/cZcCg62tAd/a3qIVuiPZYruFQk7SwQYPTD5CnPek=";
+          };
+
+          cargoLock = {
+            lockFile = "${src}/Cargo.lock";
+            outputHashes = {
+              "electrum-client-0.8.0" = "sha256-HDRdGS7CwWsPXkA1HdurwrVu4lhEx0Ay8vHi08urjZ0=";
+              "electrumd-0.1.0" = "sha256-QsoMD2uVDEITuYmYItfP6BJCq7ApoRztOCs7kdeRL9Y=";
+              "jsonrpc-0.12.0" = "sha256-lSNkkQttb8LnJej4Vfe7MrjiNPOuJ5A6w5iLstl9O1k=";
+            };
+          };
+
+          nativeBuildInputs = with pkgs; [
+            pkg-config
+          ];
+
+          cargoBuildFlags = [
+            "--features"
+            "liquid"
+            "--bin"
+            "electrs"
+          ];
+
+          doCheck = false;
+        };
       in
       {
         packages = {
@@ -84,12 +118,17 @@
         };
 
         devShells.default = pkgs.mkShell {
+          RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
+          ELEMENTSD_EXEC = "${pkgs.elementsd}/bin/elementsd";
+          ELECTRS_LIQUID_EXEC = "${electrsLiquid}/bin/electrs";
+
           packages =
             (with pkgs; [
               bitcoin
               buf
               cargo
               clippy
+              elementsd
               git
               just
               openssl
@@ -99,10 +138,12 @@
               nodejs_20
               rust-analyzer
               rustc
+              rustPlatform.rustLibSrc
               rustfmt
               vale
             ])
             ++ [
+              electrsLiquid
               ldkServer
               mdx2vast
               textlint
