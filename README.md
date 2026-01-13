@@ -33,6 +33,24 @@ direnv allow
 cargo run -- hello
 ```
 
+## E2E（LDK Server regtest）
+
+`bitcoind` と `ldk-server` を起動する。
+`tests/ldk_server_regtest_e2e.rs` で「チャネル作成 → 請求書（BOLT11） → 支払い」を検証する。
+このテストは `#[ignore]` である。
+
+次で実行する。
+
+```sh
+nix develop -c just e2e
+```
+
+失敗時にログを残す場合は、次を実行する。
+
+```sh
+nix develop -c just e2e_keep
+```
+
 ## Protobuf（Buf）
 
 Protobuf スキーマは `proto/` 配下で管理し、Buf で lint/format する。

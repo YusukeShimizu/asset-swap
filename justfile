@@ -24,3 +24,9 @@ docs_vale:
     cd docs && vale --config .vale.ini --glob='*.mdx' .
 
 ci: fmt proto_fmt proto_lint clippy test textlint docs_vale docs_links
+
+e2e:
+    cargo test --test ldk_server_regtest_e2e -- --ignored --nocapture
+
+e2e_keep:
+    KEEP_LDK_E2E_ARTIFACTS=1 cargo test --test ldk_server_regtest_e2e -- --ignored --nocapture

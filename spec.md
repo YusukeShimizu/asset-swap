@@ -120,6 +120,23 @@ actions
 ```
 
 ```text
+concept LdkServerRegtestE2E
+purpose
+    LDK Server と bitcoind を実際に起動し、regtest 上でチャネル作成と BOLT11 支払いを検証する。
+state
+    bitcoind: string
+    ldk_server: string
+    test_file: string
+actions
+    run [ ]
+        => [ ok: boolean ]
+        run `cargo test --test ldk_server_regtest_e2e -- --ignored --nocapture`
+operational principle
+    after run [ ]
+        => [ ok: true ]
+```
+
+```text
 concept Protobuf
 purpose
     Protobuf スキーマを Buf で管理する。
@@ -185,4 +202,13 @@ then {
     Textlint/lint_markdown: [ ]
     Documentation/vale: [ ]
     Documentation/broken_links: [ ] }
+```
+
+```text
+sync E2E
+when {
+    Shell/request: [ command: "just e2e" ]
+        => [] }
+then {
+    LdkServerRegtestE2E/run: [ ] }
 ```

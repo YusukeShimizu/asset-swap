@@ -43,16 +43,58 @@
           # This package is a CLI tool and doesn't require a build step.
           dontNpmBuild = true;
         };
+
+        ldkServer = pkgs.rustPlatform.buildRustPackage rec {
+          pname = "ldk-server";
+          version = "0.0.0-f3eaacd";
+
+          src = pkgs.fetchFromGitHub {
+            owner = "lightningdevkit";
+            repo = "ldk-server";
+            rev = "f3eaacd327d40fc8ee3fd7f6fbaccb04fa077434";
+            hash = "sha256-YuPSjMVHw+RrS25c6BVQ8aROSGwIBuKMut8ycupNXcs=";
+          };
+
+          cargoLock = {
+            lockFile = "${src}/Cargo.lock";
+          };
+
+          nativeBuildInputs = with pkgs; [
+            pkg-config
+            protobuf
+          ];
+
+          buildInputs = with pkgs; [
+            openssl
+          ];
+
+          cargoBuildFlags = [
+            "--package"
+            "ldk-server"
+            "--bin"
+            "ldk-server"
+          ];
+
+          doCheck = false;
+        };
       in
       {
+        packages = {
+          ldk-server = ldkServer;
+        };
+
         devShells.default = pkgs.mkShell {
           packages =
             (with pkgs; [
+              bitcoin
               buf
               cargo
               clippy
               git
               just
+              openssl
+              pkg-config
+              protobuf
               mermaid-cli
               nodejs_20
               rust-analyzer
@@ -61,6 +103,7 @@
               vale
             ])
             ++ [
+              ldkServer
               mdx2vast
               textlint
             ];
