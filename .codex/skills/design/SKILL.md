@@ -18,6 +18,7 @@ Use this skill when you are authoring or updating design documentation (example:
 - Start with invariants (“Security & Architectural Constraints”).
   Use RFC 2119 language (MUST / MUST NOT).
   Include a brief rationale.
+- If you design or change a Protobuf API (`proto/`), follow the constraints below.
 - Keep the structure flat and scannable.
   Prefer short lists, signatures, and data-shape bullets.
 - Use a ubiquitous language.
@@ -39,3 +40,12 @@ If a flow is complex, add a Mermaid sequence diagram or a state chart.
   When the doc is a plan, map it to paths in the ExecPlan.
 - If the doc implies behavior changes, reflect them in the ExecPlan.
   Update the Rust implementation too (see `$rust-template-rust`).
+
+## Protobuf API constraints
+
+When a design doc defines or changes a Protobuf API (`proto/`):
+
+- Follow Google AIP (https://google.aip.dev/) and design strictly for REST with `google.api.http`.
+- Add `buf.validate` (Protovalidate) constraints where feasible.
+- Document usage and representative error patterns in comments (service/rpc/message/field).
+- Keep `just proto_fmt` and `just proto_lint` passing.

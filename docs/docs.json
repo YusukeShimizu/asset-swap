@@ -1,8 +1,8 @@
 {
   "$schema": "https://mintlify.com/docs.json",
   "theme": "mint",
-  "name": "Rust Template",
-  "description": "Template repository documentation (Buf + AIP + Protovalidate).",
+  "name": "LN→Liquid Swap",
+  "description": "Minimal LN→Liquid swap implementation over gRPC (Lightning invoice ↔ Liquid HTLC).",
   "colors": {
     "primary": "#3B82F6"
   },
@@ -13,13 +13,12 @@
         "pages": ["index"]
       },
       {
-        "group": "Protobuf",
-        "pages": [
-          "protobuf/overview",
-          "protobuf/resource-oriented",
-          "protobuf/validation",
-          "protobuf/buf-and-ci"
-        ]
+        "group": "Swap",
+        "pages": ["swap/ln-liquid-swap", "swap/rwa-issuance-and-sale"]
+      },
+      {
+        "group": "API (Protobuf)",
+        "pages": ["protobuf/overview", "protobuf/api-design", "protobuf/validation", "protobuf/buf-and-ci"]
       }
     ]
   }

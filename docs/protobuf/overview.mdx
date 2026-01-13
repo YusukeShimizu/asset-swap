@@ -12,19 +12,15 @@ All Protobuf schemas live in `proto/`.
 
 ## Dependencies
 
-This template uses:
+This repository uses:
 
-- Google API annotations (HTTP transcoding, field behaviors, resource descriptors): `googleapis/googleapis`
+- Google API field behaviors: `googleapis/googleapis`
 - Validation annotations: `bufbuild/protovalidate`
 
-## Example API
+## Swap API schema
 
-This template includes a small example API at `proto/template/v1/greetings.proto`.
-It is designed to be replaced with your project's real resources and services, but it demonstrates:
+The LN→Liquid swap API schema is defined at:
 
-- Resource naming (`name`) and `google.api.resource` annotations
-- Standard methods (Get/List/Create/Update/Delete)
-- HTTP JSON transcoding (`google.api.http`)
-- Request validation using Protovalidate (`buf.validate.*`)
+- `proto/ln_liquid_swap/v1/swap.proto`
 
-Next: [Resource-oriented design (AIP)](/protobuf/resource-oriented)
+This API is intentionally gRPC-only (no HTTP JSON transcoding).

@@ -1,9 +1,19 @@
-# Rust Template
+# LN→Liquid Swap（gRPC）
 
-このリポジトリは、Rust プロジェクトを開始するためのテンプレートである。
-開発環境は Nix Flakes を正とし、ローカルの環境変数は direnv（`.envrc`）で管理する。
+本リポジトリは、Lightning の支払い（BOLT11）と Liquid の HTLC（P2WSH）を結合した
+最小構成の LN→Liquid swap 実装である。
+
+- 売り手は Liquid 側で HTLC を fund し、invoice を発行する。
+- 買い手は funding を検証してから invoice を支払い、preimage で HTLC を claim する。
+- 価格は seller が設定し、`GetOffer` で提示する。buyer は `CreateSwapRequest.max_total_price_msat` で過払いを防止する。
+
+完全な原子性は提供しない。想定は regtest / 検証環境である。
+
+詳細は `docs/`（Mintlify）を参照する。
 
 ## Quick start
+
+direnv を使う場合は、次を実行する。
 
 ```sh
 direnv allow
@@ -16,63 +26,50 @@ direnv を使わない場合は、次を実行する。
 nix develop -c just ci
 ```
 
-## 実行例
+## Binaries
 
-```sh
-cargo run -- hello
-cargo run -- hello --name Alice
-```
+- 売り手サーバ（gRPC）: `swap_seller`
+- 買い手クライアント（CLI）: `swap_buyer`
+
+実行例は `docs/swap/ln-liquid-swap.mdx` を参照する。
 
 ## Logging
 
-`RUST_LOG` でログの詳細度を切り替える。
+ログの詳細度は `RUST_LOG` で制御する。
 
 ```sh
 echo 'export RUST_LOG=debug' > .envrc.local
 direnv allow
-cargo run -- hello
-```
-
-## E2E（LDK Server regtest）
-
-`bitcoind` と `ldk-server` を起動する。
-`tests/ldk_server_regtest_e2e.rs` で「チャネル作成 → 請求書（BOLT11） → 支払い」を検証する。
-このテストは `#[ignore]` である。
-
-次で実行する。
-
-```sh
-nix develop -c just e2e
-```
-
-失敗時にログを残す場合は、次を実行する。
-
-```sh
-nix develop -c just e2e_keep
+nix develop -c cargo run --bin swap_seller -- --help
 ```
 
 ## Protobuf（Buf）
 
-Protobuf スキーマは `proto/` 配下で管理し、Buf で lint/format する。
+スキーマは `proto/` 配下で管理する。
+
+- API: `proto/ln_liquid_swap/v1/swap.proto`
+- Format/Lint:
 
 ```sh
-buf lint
 buf format -w
+buf lint
 ```
 
-例として、AIP 準拠の Resource Oriented API と Protovalidate を使ったスキーマを
-`proto/template/v1/greetings.proto` に含める。
+## E2E（regtest）
+
+E2E テストは `#[ignore]` である。`nix develop` 経由で必要な外部プロセスを起動する。
+
+- LDK Server（Bitcoin regtest）: `nix develop -c just e2e`
+- LWK（Liquid regtest）: `nix develop -c just lwk_e2e`
+- LN→Liquid swap: `nix develop -c just swap_e2e`
+
+失敗時にログや作業ディレクトリを保持する場合は `just e2e_keep` / `just lwk_e2e_keep` を使う。
 
 ## ドキュメント（Mintlify）
 
-Mintlify で動かすことを前提に、ドキュメントは `docs/` 配下に置く。
+ドキュメントは `docs/` 配下で管理する。
 
 - 設定: `docs/docs.json`
 - Vale: `docs/.vale.ini`
 
-CI では `just ci` がドキュメントの検査も実行する。
-
-## テンプレートの置換
-
-- `Cargo.toml` の `name` をプロジェクト名に変更する。
-- `tests/` のバイナリ名（`cargo_bin("template")`）を変更後の名前に合わせる。
+CI は `nix develop -c just ci` で品質ゲートを実行する。

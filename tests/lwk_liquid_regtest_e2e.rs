@@ -18,7 +18,7 @@ const RECEIVER_SLIP77: &str = "0000000000000000000000000000000000000000000000000
 #[test]
 #[ignore = "requires `elementsd` and liquid-enabled `electrs` binaries (run via `nix develop`)"]
 fn lwk_liquid_regtest_wallet_issue_send_balance() -> Result<()> {
-    let _ = template::logging::init();
+    let _ = ln_liquid_swap::logging::init();
 
     let env = LiquidRegtestEnv::start().context("start liquid regtest env")?;
     let electrum_url = env.electrum_url();

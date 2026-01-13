@@ -1,7 +1,8 @@
-# Rust Template Specification
+# LN→Liquid Swap Specification
 
-このリポジトリは、Rust プロジェクトを開始するための汎用テンプレートである。
-本書（`spec.md`）は、テンプレートに含める機能と開発上の不変条件を定義する。
+このリポジトリは、LN（BOLT11）支払いと Liquid HTLC（P2WSH）を結合した
+LN→Liquid swap の最小実装である。
+本書（`spec.md`）は、このリポジトリが満たすべき機能と不変条件を定義する。
 
 本書は、arXiv:2508.14511v2 に準拠する。
 対象論文のタイトルは「What You See Is What It Does」である。
@@ -18,6 +19,9 @@ state
     env: string -> string
 actions
     request [ command: string ]
+        => [ ]
+operational principle
+    after request [ command: "just ci" ]
         => [ ]
 ```
 
@@ -47,26 +51,6 @@ operational principle
 ```
 
 ```text
-concept RustCLI
-purpose
-    Rust のツールチェーンと CI 配線を検証するための最小 CLI を提供する。
-state
-    binary_name: string
-actions
-    hello [ ]
-        => [ exit_code: 0 ; stdout: "Hello, world!\n" ]
-        CLI 引数の parse 後に debug ログ `"parsed cli"` を出力する。
-    hello [ name: string ]
-        => [ exit_code: 0 ; stdout: "Hello, <NAME>!\n" ]
-        CLI 引数の parse 後に debug ログ `"parsed cli"` を出力する。
-operational principle
-    after hello [ ]
-        => [ exit_code: 0 ; stdout: "Hello, world!\n" ]
-    then hello [ name: "Alice" ]
-        => [ exit_code: 0 ; stdout: "Hello, Alice!\n" ]
-```
-
-```text
 concept Logging
 purpose
     tracing による構造化ログを提供する。
@@ -79,12 +63,63 @@ actions
         configure `tracing_subscriber::EnvFilter` from `RUST_LOG`
         default to `info` when `RUST_LOG` is not set
         write logs to stderr
-        when the effective filter enables debug, emit debug logs (e.g. `"parsed cli"`)
 operational principle
     after init [ ]
         => [ ]
-    then RustCLI/hello [ ]
-        => [ exit_code: 0 ]
+    then Shell/request [ command: "RUST_LOG=debug cargo run --bin swap_seller -- --help" ]
+        => [ ]
+```
+
+```text
+concept LnLiquidSwap
+purpose
+    LN の invoice 支払いと Liquid HTLC（P2WSH）を結合した swap を提供する。
+    本実装は完全な原子性を提供しない。
+state
+    proto_file: string
+actions
+    get_offer [ asset_id: string ]
+        => [ price_msat_per_asset_unit: uint64; fee_subsidy_sats: uint64; refund_delta_blocks: uint32; invoice_expiry_secs: uint32; max_min_funding_confs: uint32 ]
+        buyer SHOULD call `get_offer` before `create_swap` to discover pricing without funding an HTLC
+    create_swap [ asset_id: string; asset_amount: uint64; buyer_claim_address: string; min_funding_confs: uint32; max_total_price_msat: uint64 ]
+        => [ swap_id: string; bolt11_invoice: string; payment_hash: string; funding_txid: string; p2wsh_address: string ]
+        seller MUST fund the Liquid HTLC before returning `bolt11_invoice`
+        seller MUST compute invoice amount as `asset_amount * price_msat_per_asset_unit`
+        seller MUST reject if `max_total_price_msat != 0` and invoice amount exceeds `max_total_price_msat`
+        buyer MUST verify funding and hash matches before paying `bolt11_invoice`
+    get_swap [ swap_id: string ]
+        => [ found: boolean ]
+operational principle
+    after get_offer [ asset_id: "<ASSET_ID>" ]
+        => [ price_msat_per_asset_unit: 1000 ]
+    then create_swap [ asset_id: "<ASSET_ID>"; asset_amount: 1000; buyer_claim_address: "<ADDR>"; min_funding_confs: 1; max_total_price_msat: 1000000 ]
+        => [ swap_id: "<UUID>" ]
+    then get_swap [ swap_id: "<UUID>" ]
+        => [ found: true ]
+```
+
+```text
+concept SqliteSwapStore
+purpose
+    swap の復旧に必要な最小データを SQLite へ永続化する。
+state
+    store_path: string
+actions
+    open [ store_path: string ]
+        => [ ok: boolean ]
+    insert_swap [ swap_id: string ]
+        => [ ok: boolean ]
+    get_swap [ swap_id: string ]
+        => [ found: boolean ]
+    update_status [ swap_id: string; status: string ]
+        => [ ok: boolean ]
+    list_swaps [ ]
+        => [ count: uint32 ]
+operational principle
+    after open [ store_path: "<TMP>/swap_store.sqlite3" ]
+        => [ ok: true ]
+    then insert_swap [ swap_id: "swap-a" ]
+        => [ ok: true ]
 ```
 
 ```text
@@ -104,6 +139,11 @@ actions
     test [ ]
         => [ ok: boolean ]
         run `cargo test --all`
+operational principle
+    after fmt_check [ ]
+        => [ ok: true ]
+    then clippy [ ]
+        => [ ok: true ]
 ```
 
 ```text
@@ -117,6 +157,9 @@ actions
     run [ ]
         => [ ok: boolean ]
         run `cargo test --all`
+operational principle
+    after run [ ]
+        => [ ok: true ]
 ```
 
 ```text
@@ -154,11 +197,32 @@ operational principle
 ```
 
 ```text
+concept LnLiquidSwapE2E
+purpose
+    LN（bitcoind + ldk-server）と Liquid（elementsd + electrs）を実際に起動し、
+    swap の作成・支払い・claim を検証する。
+state
+    bitcoind: string
+    ldk_server: string
+    elementsd: string
+    electrs_liquid: string
+    test_file: string
+actions
+    run [ ]
+        => [ ok: boolean ]
+        run `cargo test --test ln_liquid_swap_e2e -- --ignored --nocapture`
+operational principle
+    after run [ ]
+        => [ ok: true ]
+```
+
+```text
 concept Protobuf
 purpose
     Protobuf スキーマを Buf で管理する。
 state
     proto_dir: string
+    swap_proto: string
     buf_yaml: string
     buf_lock: string
 actions
@@ -171,6 +235,11 @@ actions
     dep_update [ ]
         => [ ok: boolean ]
         run `buf dep update` (writes `buf.lock`)
+operational principle
+    after format_check [ ]
+        => [ ok: true ]
+    then lint [ ]
+        => [ ok: true ]
 ```
 
 ```text
@@ -188,6 +257,11 @@ actions
     broken_links [ ]
         => [ ok: boolean ]
         run `mint broken-links` for `docs/`
+operational principle
+    after vale [ ]
+        => [ ok: true ]
+    then broken_links [ ]
+        => [ ok: true ]
 ```
 
 ```text
@@ -201,6 +275,9 @@ actions
     lint_markdown [ ]
         => [ ok: boolean ]
         run `textlint` for tracked `*.md` files (excluding `.codex/`)
+operational principle
+    after lint_markdown [ ]
+        => [ ok: true ]
 ```
 
 ## Synchronizations
@@ -237,4 +314,13 @@ when {
         => [] }
 then {
     LwkLiquidRegtestE2E/run: [ ] }
+```
+
+```text
+sync SWAP_E2E
+when {
+    Shell/request: [ command: "just swap_e2e" ]
+        => [] }
+then {
+    LnLiquidSwapE2E/run: [ ] }
 ```

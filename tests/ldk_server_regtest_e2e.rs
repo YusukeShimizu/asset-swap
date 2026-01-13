@@ -22,7 +22,7 @@ use support::wait::wait_for;
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires `bitcoind` and `ldk-server` binaries (run via `nix develop`)"]
 async fn ldk_server_regtest_channel_invoice_payment() -> anyhow::Result<()> {
-    let _ = template::logging::init();
+    let _ = ln_liquid_swap::logging::init();
 
     let bitcoind = BitcoindProcess::start().context("start bitcoind")?;
     bitcoind

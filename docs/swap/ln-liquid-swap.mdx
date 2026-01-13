@@ -1,0 +1,221 @@
+---
+title: LN→Liquid Swap (gRPC)
+description: How to create a swap, pay over Lightning, and claim a Liquid HTLC.
+---
+
+This repository includes a minimal LN→Liquid swap implementation over gRPC.
+It allows a buyer to pay a Lightning invoice and (practically) atomically receive a Liquid asset
+locked in a P2WSH HTLC (hashlock + CLTV).
+
+This page is the API-oriented overview.
+For a regtest runbook (including issuing an asset as RWA and selling it), see
+[RWA を発行して販売する（regtest）](/swap/rwa-issuance-and-sale).
+
+## What This API Does
+
+- Seller funds a Liquid HTLC output with the asset and an LBTC fee subsidy.
+- Seller returns a BOLT11 invoice whose payment hash matches the HTLC hashlock.
+- Buyer pays the invoice, obtains the preimage, and spends the HTLC to claim the asset.
+
+This is a minimal design and is not production-ready.
+
+## Assumptions (Read First)
+
+- The external API is **gRPC only** (no HTTP JSON).
+- gRPC runs in **plaintext** and there is **no authentication/authorization**.
+  - Do not expose the service to the public internet.
+  - Protect it with network-level controls (private network / firewall) if used outside regtest.
+- HTLC outputs are **explicit (unblinded)** for simplicity.
+- Current binaries are fixed to `ElementsNetwork::default_regtest()` (Liquid regtest).
+  - Mainnet/testnet support is out of scope for this repo’s current state.
+
+## Roles
+
+- **Seller**
+  - Runs the gRPC server (`swap_seller`).
+  - Holds inventory of the asset being sold.
+  - Locks both the asset output and an LBTC fee subsidy output into the HTLC.
+- **Buyer**
+  - Uses the buyer CLI (`swap_buyer`) or calls the gRPC API directly.
+  - MUST verify the invoice and the Liquid funding transaction before paying.
+
+## Pricing Model (Simplest)
+
+- The seller decides the price by configuration (`--price-msat-per-asset-unit`).
+- The buyer discovers the current price via `GetOffer`.
+- The buyer MUST use `CreateSwapRequest.max_total_price_msat` to cap the invoice amount.
+  - The server computes `total_price_msat = asset_amount * price_msat_per_asset_unit`.
+  - If `total_price_msat > max_total_price_msat`, the server rejects with `INVALID_ARGUMENT`.
+
+This is the simplest way to prevent accidental overpayment if the seller changes the price between:
+
+- a `GetOffer` call, and
+- a later `CreateSwap` call (for example a retry).
+
+## Prerequisites
+
+- A Lightning node via `ldk-server` (this repo uses its REST API internally).
+- A Liquid backend reachable via Electrum (for example: liquid-enabled `electrs`).
+- Seller inventory:
+  - enough units of the asset being sold, and
+  - enough LBTC to fund `fee_subsidy_sats` per swap.
+
+## API Overview
+
+The Protobuf schema is at `proto/ln_liquid_swap/v1/swap.proto`.
+The Protobuf package name is `ln_liquid_swap.v1`.
+
+### `GetOffer`
+
+Gets pricing and policy parameters for the asset.
+Use this before `CreateSwap` so a buyer can learn pricing without forcing the seller to fund an HTLC.
+
+The client sends a `GetOfferRequest`:
+
+- `asset_id`: 32-byte asset id, hex-encoded (64 hex chars).
+
+The server returns an `Offer` containing:
+
+- `price_msat_per_asset_unit`: price in millisatoshis per 1 asset unit.
+- `fee_subsidy_sats`: LBTC subsidy the seller locks in the HTLC.
+- `refund_delta_blocks`, `invoice_expiry_secs`: policy parameters.
+- `max_min_funding_confs`: server-enforced maximum for `CreateSwap.min_funding_confs`.
+
+### `CreateSwap`
+
+The client sends a `CreateSwapRequest`:
+
+- `asset_id`: 32-byte asset id, hex-encoded (64 hex chars).
+- `asset_amount`: amount of the asset to receive (must be > 0).
+- `buyer_claim_address`: Liquid address that will receive the claimed outputs (expects P2WPKH).
+- `min_funding_confs`: required confirmations for the funding transaction (0–6).
+- `max_total_price_msat`: buyer protection against overpaying (recommended).
+
+The server returns a `Swap` containing:
+
+- `bolt11_invoice`: the Lightning invoice to pay.
+- `payment_hash`: hex-encoded payment hash (must match the invoice and the HTLC witness script).
+- `liquid`: HTLC details:
+  - `witness_script` (bytes),
+  - `p2wsh_address`,
+  - `funding_txid`, `asset_vout`, `lbtc_vout`,
+  - `refund_lock_height`.
+
+Error handling notes:
+
+- `INVALID_ARGUMENT` for malformed requests, validation failures, or `max_total_price_msat` exceeded.
+- `FAILED_PRECONDITION` when the seller cannot fund (inventory/LBTC insufficient).
+- `INTERNAL` for unexpected wallet/backend failures.
+
+### `GetSwap`
+
+Fetches a swap by `swap_id`.
+The current implementation uses UUID strings for ids.
+
+Note: In the current minimal implementation, the seller does not automatically detect claim spends.
+`GetSwap` is mainly useful for recovery/inspection of swaps created by the seller process.
+
+## Buyer Safety Checklist (Must Do)
+
+Before paying `bolt11_invoice`, a buyer must verify:
+
+- The invoice payment hash matches `payment_hash`.
+- The invoice amount is less than or equal to the buyer's intended maximum (for example `max_total_price_msat`).
+- The payment hash in `liquid.witness_script` matches the invoice payment hash.
+- The funding transaction (`funding_txid`) pays the expected P2WSH scriptPubKey:
+  - `asset_vout` locks `asset_id` and `asset_amount`.
+  - `lbtc_vout` locks `fee_subsidy_sats` of LBTC.
+- The funding transaction has at least `min_funding_confs` confirmations.
+
+The provided buyer CLI (`swap_buyer`) performs these checks.
+
+## Calling the API with `grpcurl`
+
+`swap.proto` imports Protovalidate and `google.api.field_behavior`.
+For tools that call `protoc` directly (like `grpcurl`), this repo includes a minimal set of
+dependency protos under `proto_deps/`.
+
+Example (plaintext gRPC):
+
+```sh
+grpcurl \
+  -plaintext \
+  -import-path proto \
+  -import-path proto_deps \
+  -proto proto/ln_liquid_swap/v1/swap.proto \
+  -d '{
+    "asset_id": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+  }' \
+  127.0.0.1:50051 \
+  ln_liquid_swap.v1.SwapService/GetOffer
+
+grpcurl \
+  -plaintext \
+  -import-path proto \
+  -import-path proto_deps \
+  -proto proto/ln_liquid_swap/v1/swap.proto \
+  -d '{
+    "asset_id": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "asset_amount": 1000,
+    "buyer_claim_address": "ert1...",
+    "min_funding_confs": 1,
+    "max_total_price_msat": 1000000
+  }' \
+  127.0.0.1:50051 \
+  ln_liquid_swap.v1.SwapService/CreateSwap
+```
+
+Notes:
+
+- `bytes` fields (like `witness_script`) are base64-encoded in JSON.
+- `CreateSwap` may block until `min_funding_confs` are reached.
+
+## Using the Included Binaries
+
+This repo provides two binaries:
+
+- Seller server: `swap_seller` (gRPC)
+- Buyer client: `swap_buyer` (CLI)
+
+Run them via `nix develop` so required external binaries are available.
+
+Seller example:
+
+- `--store-path` points to a local SQLite database file used for swap persistence.
+
+```sh
+nix develop -c cargo run --bin swap_seller -- \
+  --listen-addr 127.0.0.1:50051 \
+  --ldk-rest-addr http://127.0.0.1:3001 \
+  --liquid-electrum-url tcp://127.0.0.1:50001 \
+  --wallet-dir ./data/seller_wallet \
+  --store-path ./data/swap_store.sqlite3 \
+  --seller-mnemonic "$SELLER_MNEMONIC" \
+  --seller-slip77 "$SELLER_SLIP77" \
+  --sell-asset-id "$ASSET_ID" \
+  --price-msat-per-asset-unit 1000 \
+  --fee-subsidy-sats 10000 \
+  --refund-delta-blocks 144 \
+  --invoice-expiry-secs 3600
+```
+
+Buyer example:
+
+```sh
+nix develop -c cargo run --bin swap_buyer -- \
+  --seller-grpc-url http://127.0.0.1:50051 \
+  --ldk-rest-addr http://127.0.0.1:3002 \
+  --liquid-electrum-url tcp://127.0.0.1:50001 \
+  --wallet-dir ./data/buyer_wallet \
+  --buyer-mnemonic "$BUYER_MNEMONIC" \
+  --buyer-slip77 "$BUYER_SLIP77" \
+  --asset-id "$ASSET_ID" \
+  --asset-amount 1000 \
+  --min-funding-confs 1
+```
+
+## Notes and Limitations
+
+- This implementation uses explicit (unblinded) HTLC outputs for simplicity.
+- This design is not fully atomic and is intended for controlled environments (for example: regtest).
+- Refund handling is best-effort and depends on the seller process being up.

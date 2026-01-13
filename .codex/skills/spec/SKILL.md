@@ -36,6 +36,7 @@ Synchronizations で構造化して記述する。
 ## Writing rules
 
 - 用語は Rust 実装・Integration Test・`justfile` と一致させる。
+- Protobuf API（`proto/`）に関わる仕様は、Google AIP に則り、REST と validation 前提で記述する。
 - 代表的な品質ゲートは `just ci` に集約し、spec には同期（Sync）として表現する。
 - 文章は textlint を前提に、一文を短く保つ（必要なら文を分割する）。
 
@@ -51,3 +52,4 @@ Synchronizations で構造化して記述する。
 - `README.md`/`docs/` の開発手順も整合させる（手順が変わる場合のみ）。
 - `nix develop -c just ci` が通る状態で終える。
 - Markdown を更新したら `nix develop -c textlint <file...>` を実行する。
+- Protobuf を更新したら `nix develop -c just proto_fmt proto_lint` を実行する。

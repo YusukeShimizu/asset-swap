@@ -1,17 +1,24 @@
 ---
 title: Introduction
-description: How this repository structures docs, Protobuf schemas, and CI checks.
+description: Minimal LN→Liquid swap (gRPC) and how to develop it.
 ---
 
 This repository keeps all documentation content under `docs/` so it can be deployed with Mintlify.
 The site configuration lives in `docs/docs.json`.
 
-## Protobuf
+## Swap
 
-Protobuf schemas are managed with Buf and follow Google's API Improvement Proposals (AIP) with a resource-oriented design.
+This repository includes a minimal LN→Liquid swap implementation over gRPC.
+
+- [LN→Liquid Swap (gRPC)](/swap/ln-liquid-swap)
+- [RWA を発行して販売する（regtest）](/swap/rwa-issuance-and-sale)
+
+## API (Protobuf)
+
+The swap API schema lives under `proto/` and is managed with Buf.
 
 - Start here: [Protobuf overview](/protobuf/overview)
-- Design guidelines: [Resource-oriented design (AIP)](/protobuf/resource-oriented)
+- Service design notes: [API design](/protobuf/api-design)
 - Validation annotations: [Protovalidate](/protobuf/validation)
 - Tooling and CI: [Buf and CI checks](/protobuf/buf-and-ci)
 

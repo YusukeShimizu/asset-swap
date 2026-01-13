@@ -16,6 +16,8 @@ pub struct LdkServerProcess {
     temp_dir: Option<TempDir>,
     name: String,
     listen_addr: String,
+    #[allow(dead_code)]
+    rest_service_address: String,
     child: Child,
     client: LdkServerClient,
     stdout_log_path: PathBuf,
@@ -82,12 +84,13 @@ impl LdkServerProcess {
             .spawn()
             .with_context(|| format!("spawn ldk-server ({name})"))?;
 
-        let client = LdkServerClient::new(rest_service_address);
+        let client = LdkServerClient::new(rest_service_address.clone());
 
         Ok(Self {
             temp_dir: Some(temp_dir),
             name: name.to_string(),
             listen_addr,
+            rest_service_address,
             child,
             client,
             stdout_log_path,
@@ -101,6 +104,11 @@ impl LdkServerProcess {
 
     pub fn listen_addr(&self) -> &str {
         &self.listen_addr
+    }
+
+    #[allow(dead_code)]
+    pub fn rest_service_address(&self) -> &str {
+        &self.rest_service_address
     }
 
     pub fn stdout_log_path(&self) -> &PathBuf {

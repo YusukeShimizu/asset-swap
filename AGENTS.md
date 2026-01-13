@@ -4,15 +4,17 @@
 
 ## 開発原則
 
+
 1. 仕様は `spec.md` を正とする。
-2. 開発環境は Nix Flakes（`nix develop`）で再現する。
-3. 環境変数は direnv（`.envrc`）で管理する。
-4. 代表的な操作は Integration Test（`tests/`）で先に表現する。
-5. Integration Test は mock を使わない。
-6. 実装は単一責任を守り、用語は一貫させる。
-7. ログは `tracing` を使い、`RUST_LOG` で詳細度を制御する。
-8. 文章（Markdown）を更新したら `textlint` を実行する。
-9. 代表的な品質ゲートは `just ci` で実行する。
+2. 作業開始前に `.codex/skills/` を確認し、該当する Skill があれば指示に従う。
+3. 開発環境は Nix Flakes（`nix develop`）で再現する。
+4. 環境変数は direnv（`.envrc`）で管理する。
+5. 代表的な操作は Integration Test（`tests/`）で先に表現する。
+6. Integration Test は mock を使わない。
+7. 実装は単一責任を守り、用語は一貫させる。
+8. ログは `tracing` を使い、`RUST_LOG` で詳細度を制御する。
+9. 文章（Markdown）を更新したら `textlint` を実行する。
+10. 代表的な品質ゲートは `just ci` で実行する。
 
 ## 文書の校正ルール
 

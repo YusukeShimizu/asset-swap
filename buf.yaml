@@ -17,7 +17,7 @@ deps:
 
 lint:
   use:
-    # STANDARD is a pragmatic baseline that keeps this template language-agnostic.
+    # STANDARD is a pragmatic baseline that keeps this repository language-agnostic.
     - STANDARD
   except:
     # AIP commonly returns the resource directly for Get/Create/Update.
@@ -27,5 +27,5 @@ lint:
 
 breaking:
   use:
-    # FILE is suitable for early-stage schemas and template repos.
+    # FILE is suitable for early-stage schemas.
     - FILE

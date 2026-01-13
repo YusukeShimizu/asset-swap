@@ -1,5 +1,5 @@
 {
-  description = "Rust template repository (dev env via Nix Flakes)";
+  description = "LN→Liquid swap repository (dev env via Nix Flakes)";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";

@@ -1,0 +1,22 @@
+---
+title: API Design
+description: Design notes for the swap gRPC API.
+---
+
+This repository's swap API is intentionally **gRPC-only**.
+
+## Conventions
+
+- Prefer explicit request/response message types, even for simple RPCs.
+- Validate inputs with Protovalidate where possible.
+- Document expected error codes and preconditions in `.proto` comments.
+
+## `SwapService`
+
+The swap seller implements `SwapService` and exposes it over gRPC.
+The buyer calls:
+
+- `GetOffer`: fetch pricing/policy for an asset (no HTLC funding side-effects).
+- `CreateSwap`: create a swap and return the invoice + Liquid HTLC details.
+  - Buyers should set `CreateSwapRequest.max_total_price_msat` to prevent overpaying.
+- `GetSwap`: fetch swap status/details by `swap_id`.

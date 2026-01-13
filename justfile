@@ -1,3 +1,5 @@
+#!/usr/bin/env bash
+
 fmt:
     cargo fmt --all -- --check
 
@@ -14,7 +16,7 @@ test:
     cargo test --all
 
 textlint:
-    textlint "$(git ls-files '*.md' | grep -v '^\.codex/')"
+    textlint $(git ls-files '*.md' | grep -v '^\.codex/')
 
 docs_links:
     cd docs && PUPPETEER_SKIP_DOWNLOAD=1 PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=1 npx --yes mint@4.2.269 broken-links
@@ -36,3 +38,6 @@ lwk_e2e:
 
 lwk_e2e_keep:
     KEEP_LWK_E2E_ARTIFACTS=1 cargo test --test lwk_liquid_regtest_e2e -- --ignored --nocapture
+
+swap_e2e:
+    cargo test --test ln_liquid_swap_e2e -- --ignored --nocapture

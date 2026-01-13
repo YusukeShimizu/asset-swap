@@ -1,0 +1,217 @@
+syntax = "proto3";
+
+package ln_liquid_swap.v1;
+
+import "buf/validate/validate.proto";
+import "google/api/field_behavior.proto";
+
+// LN→Liquid swap schema.
+//
+// This API is intentionally gRPC-only (no HTTP JSON transcoding).
+//
+// Overview:
+// - The seller locks a Liquid asset in a P2WSH HTLC (hashlock + CLTV).
+// - The seller creates a standard BOLT11 invoice whose payment hash matches the HTLC hashlock.
+// - The buyer pays the invoice, obtains the preimage, and claims the Liquid HTLC with:
+//   - the preimage, and
+//   - the buyer signature (so intermediaries cannot steal with preimage-only).
+//
+// Notes:
+// - This swap provides "practical atomicity", not full atomicity.
+// - HTLC outputs are explicit (unblinded) in this minimal design.
+service SwapService {
+  // Gets the current offer (pricing and policy parameters) for an asset.
+  //
+  // This RPC exists so buyers can learn pricing without forcing the seller to fund an HTLC
+  // (unlike `CreateSwap`).
+  //
+  // Errors:
+  // - `INVALID_ARGUMENT` if `asset_id` is malformed or unsupported.
+  rpc GetOffer(GetOfferRequest) returns (Offer);
+
+  // Creates a new swap and returns the details needed for the buyer.
+  //
+  // Server behavior (minimal implementation):
+  // - Funds the Liquid HTLC and broadcasts the funding transaction.
+  // - Waits until the funding transaction has at least `min_funding_confs` confirmations.
+  // - Returns the BOLT11 invoice and the Liquid HTLC details.
+  //
+  // Buyer safety checks (MUST):
+  // - Verify the invoice payment hash matches `payment_hash` and the HTLC witness script.
+  // - Verify the funding transaction outputs match the returned P2WSH script and amounts.
+  // - Verify the funding transaction has at least `min_funding_confs` confirmations.
+  //
+  // Errors:
+  // - `INVALID_ARGUMENT` if the request is malformed or fails validation.
+  // - `FAILED_PRECONDITION` if the seller cannot fund the HTLC (e.g., insufficient inventory).
+  // - `INTERNAL` for unexpected wallet / backend failures.
+  rpc CreateSwap(CreateSwapRequest) returns (CreateSwapResponse);
+
+  // Gets a swap by id.
+  //
+  // Errors:
+  // - `INVALID_ARGUMENT` if `swap_id` is malformed.
+  // - `NOT_FOUND` if the swap does not exist.
+  rpc GetSwap(GetSwapRequest) returns (Swap);
+}
+
+message CreateSwapRequest {
+  // The asset id (32 bytes, hex-encoded).
+  string asset_id = 1 [
+    (google.api.field_behavior) = REQUIRED,
+    (buf.validate.field).required = true,
+    (buf.validate.field).string.len = 64,
+    (buf.validate.field).string.pattern = "^[0-9a-fA-F]{64}$"
+  ];
+
+  // The amount of the asset to receive.
+  //
+  // Must be greater than 0.
+  uint64 asset_amount = 2 [(buf.validate.field).uint64.gt = 0];
+
+  // The Liquid address that will receive the claimed outputs.
+  //
+  // This design expects a P2WPKH address (v0 witness program, 20 bytes).
+  string buyer_claim_address = 3 [
+    (google.api.field_behavior) = REQUIRED,
+    (buf.validate.field).required = true,
+    (buf.validate.field).string.min_len = 1,
+    (buf.validate.field).string.max_len = 128
+  ];
+
+  // The minimum required confirmations for the HTLC funding transaction.
+  //
+  // If this value is 0, the server may return once the funding transaction is visible to the
+  // Liquid backend (typically mempool).
+  //
+  // The server may reject excessively large values to avoid long-running requests.
+  uint32 min_funding_confs = 4 [(buf.validate.field).uint32.lte = 6];
+
+  // The maximum total price (in millisatoshis) the buyer is willing to pay.
+  //
+  // If `max_total_price_msat` is set to 0, the server does not enforce an upper bound.
+  //
+  // The server computes:
+  // - `total_price_msat = asset_amount * price_msat_per_asset_unit`
+  //
+  // and rejects the request with `INVALID_ARGUMENT` if:
+  // - `total_price_msat > max_total_price_msat`
+  //
+  // This protects buyers from overpaying if the seller's price changes between:
+  // - `GetOffer`, and
+  // - `CreateSwap` retry attempts.
+  uint64 max_total_price_msat = 5;
+}
+
+message CreateSwapResponse {
+  // The created swap.
+  Swap swap = 1;
+}
+
+message GetOfferRequest {
+  // The asset id (32 bytes, hex-encoded).
+  //
+  // Current implementation supports exactly one sellable asset id.
+  string asset_id = 1 [
+    (google.api.field_behavior) = REQUIRED,
+    (buf.validate.field).required = true,
+    (buf.validate.field).string.len = 64,
+    (buf.validate.field).string.pattern = "^[0-9a-fA-F]{64}$"
+  ];
+}
+
+message Offer {
+  // The asset id being sold (hex-encoded).
+  string asset_id = 1;
+
+  // The price in millisatoshis per 1 asset unit.
+  uint64 price_msat_per_asset_unit = 2;
+
+  // The LBTC amount the seller locks in the HTLC to subsidize claim/refund fees.
+  uint64 fee_subsidy_sats = 3;
+
+  // The relative refund timelock in blocks (used to compute `refund_lock_height`).
+  uint32 refund_delta_blocks = 4;
+
+  // The invoice expiry used for swaps (seconds).
+  uint32 invoice_expiry_secs = 5;
+
+  // The maximum allowed `min_funding_confs` accepted by the server.
+  uint32 max_min_funding_confs = 6;
+}
+
+message GetSwapRequest {
+  // The swap id returned by `CreateSwap`.
+  //
+  // Current implementation uses a UUID string.
+  string swap_id = 1 [
+    (google.api.field_behavior) = REQUIRED,
+    (buf.validate.field).required = true,
+    (buf.validate.field).string.min_len = 1,
+    (buf.validate.field).string.max_len = 64,
+    (buf.validate.field).string.pattern = "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+  ];
+}
+
+// SwapStatus describes the server's view of the swap lifecycle.
+enum SwapStatus {
+  SWAP_STATUS_UNSPECIFIED = 0;
+  SWAP_STATUS_CREATED = 1;
+  SWAP_STATUS_FUNDED = 2;
+  SWAP_STATUS_CLAIMED = 3;
+  SWAP_STATUS_REFUNDED = 4;
+  SWAP_STATUS_FAILED = 5;
+}
+
+message Swap {
+  // The swap id. Use this value with `GetSwap`.
+  string swap_id = 1;
+
+  // The Lightning invoice to be paid by the buyer.
+  string bolt11_invoice = 2;
+
+  // The invoice payment hash (hex-encoded, 32 bytes).
+  string payment_hash = 3;
+
+  // The current swap status.
+  SwapStatus status = 4;
+
+  // Liquid-side HTLC details.
+  LiquidHtlc liquid = 5;
+}
+
+message LiquidHtlc {
+  // The asset id (hex-encoded).
+  string asset_id = 1;
+
+  // The locked amount for the asset output.
+  uint64 asset_amount = 2;
+
+  // The locked amount for the fee-subsidy LBTC output.
+  uint64 fee_subsidy_sats = 3;
+
+  // The absolute refund lock height used in CLTV (block height).
+  uint32 refund_lock_height = 4;
+
+  // The P2WSH address of the HTLC output(s).
+  string p2wsh_address = 5;
+
+  // The HTLC witness script (raw bytes).
+  //
+  // Clients may use this value to:
+  // - derive the expected P2WSH scriptPubKey, and
+  // - verify the embedded payment hash (hashlock) and refund lock height (CLTV).
+  bytes witness_script = 6;
+
+  // The txid of the funding transaction (hex-encoded).
+  string funding_txid = 7;
+
+  // The vout of the locked asset output in the funding transaction.
+  uint32 asset_vout = 8;
+
+  // The vout of the locked LBTC output in the funding transaction.
+  uint32 lbtc_vout = 9;
+
+  // The minimum required confirmations for the funding transaction.
+  uint32 min_funding_confs = 10;
+}
