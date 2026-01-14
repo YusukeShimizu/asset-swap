@@ -2,7 +2,7 @@
 
 ## Goal
 
-- `design/ln_liquid_swap_minimal.md` の最小 swap を、**閉域・単一プロセス運用**の production-lite として堅牢化する。
+- `spec.md` に基づく最小 swap を、**閉域・単一プロセス運用**の production-lite として堅牢化する。
 - 具体的には「冪等な `CreateSwap`」「軽量 DB 永続化」「在庫の二重割当防止」「claim/refund の状態追跡」を成立させる。
 
 ### 非目的
@@ -22,7 +22,7 @@
   - swap / request_id / 在庫予約のスキーマを追加する。
 - 売り手サーバ:
   - `src/swap/service.rs` の `CreateSwap` を冪等化し、状態遷移を明確化する。
-  - `src/bin/swap_seller.rs` に監視ワーカー（claim/refund/funding）を追加する。
+  - `src/bin/swap_server.rs` に監視ワーカー（claim/refund/funding）を追加する。
 - Liquid:
   - funding 確認と spend 追跡のために、Electrum から必要な情報を取得する（必要なら依存を追加する）。
 - ドキュメント:

@@ -1,8 +1,7 @@
 mod support;
 
 use std::net::SocketAddr;
-use std::str::FromStr as _;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
@@ -26,14 +25,15 @@ use support::wait::wait_for;
 
 use ln_liquid_swap::lightning::invoice::payment_hash_from_bolt11;
 use ln_liquid_swap::lightning::ldk::LdkLightningClient;
-use ln_liquid_swap::liquid::htlc::{HtlcFunding, claim_tx_from_witness_script, sha256_preimage};
-use ln_liquid_swap::liquid::keys::derive_secret_key;
+use ln_liquid_swap::liquid::htlc::sha256_preimage;
 use ln_liquid_swap::liquid::wallet::LiquidWallet;
-use ln_liquid_swap::proto::v1::CreateSwapRequest;
 use ln_liquid_swap::proto::v1::swap_service_client::SwapServiceClient;
 use ln_liquid_swap::proto::v1::swap_service_server::SwapServiceServer;
-use ln_liquid_swap::swap::service::{SellerConfig, SwapSellerService};
-use ln_liquid_swap::swap::store::SqliteSwapStore;
+use ln_liquid_swap::proto::v1::{
+    ClaimAssetRequest, CreateQuoteRequest, CreateSwapRequest, PayLightningRequest,
+};
+use ln_liquid_swap::swap::service::{SwapServiceConfig, SwapServiceImpl};
+use ln_liquid_swap::swap::store::SqliteStore;
 
 const ISSUER_MNEMONIC: &str = lwk_test_util::TEST_MNEMONIC;
 const ISSUER_SLIP77: &str = lwk_test_util::TEST_MNEMONIC_SLIP77;
@@ -282,7 +282,7 @@ async fn ln_to_liquid_swap_create_pay_claim() -> Result<()> {
         .context("sync seller after receiving asset")?;
 
     let buyer_dir = tempfile::tempdir().context("create buyer wallet dir")?;
-    let mut buyer_wallet = LiquidWallet::new(
+    let buyer_wallet = LiquidWallet::new(
         BUYER_MNEMONIC,
         BUYER_SLIP77,
         &electrum_url,
@@ -296,22 +296,32 @@ async fn ln_to_liquid_swap_create_pay_claim() -> Result<()> {
         .balance(&asset_id)
         .context("buyer asset balance before")?;
 
-    // --- Swap seller gRPC server (LN receiver = bob) ---
-    let store_path = seller_dir.path().join("swap_store.sqlite3");
-    let store = SqliteSwapStore::open(store_path).context("create swap store")?;
-    let store = Arc::new(std::sync::Mutex::new(store));
-    let wallet = Arc::new(std::sync::Mutex::new(seller_wallet));
+    // --- Swap gRPC server (seller LN = bob, buyer LN = alice) ---
+    let store_path = seller_dir.path().join("store.sqlite3");
+    let store = SqliteStore::open(store_path).context("create sqlite store")?;
+    let store = Arc::new(Mutex::new(store));
+    let seller_wallet = Arc::new(Mutex::new(seller_wallet));
+    let buyer_wallet = Arc::new(Mutex::new(buyer_wallet));
 
-    let cfg = SellerConfig {
+    let cfg = SwapServiceConfig {
         sell_asset_id: asset_id,
         price_msat_per_asset_unit: 1_000,
         fee_subsidy_sats: 10_000,
         refund_delta_blocks: 20,
         invoice_expiry_secs: 3600,
         seller_key_index: 0,
+        buyer_key_index: 0,
     };
     let seller_ln = LdkLightningClient::new(bob.rest_service_address().to_string());
-    let svc = SwapSellerService::new(cfg, seller_ln, wallet.clone(), store);
+    let buyer_ln = LdkLightningClient::new(alice.rest_service_address().to_string());
+    let svc = SwapServiceImpl::new(
+        cfg,
+        seller_ln,
+        buyer_ln,
+        seller_wallet.clone(),
+        buyer_wallet.clone(),
+        store,
+    );
 
     let port = get_available_port().context("select gRPC port")?;
     let listen_addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
@@ -331,33 +341,44 @@ async fn ln_to_liquid_swap_create_pay_claim() -> Result<()> {
         .context("connect swap seller")?;
 
     let asset_amount = 1_000u64;
-    let mut create_fut = Box::pin(swap_client.create_swap(CreateSwapRequest {
-        asset_id: asset_id.to_string(),
-        asset_amount,
-        buyer_claim_address: buyer_receive.to_string(),
-        min_funding_confs: 1,
-        max_total_price_msat: 0,
-    }));
+    let quote = swap_client
+        .create_quote(CreateQuoteRequest {
+            asset_id: asset_id.to_string(),
+            asset_amount,
+            min_funding_confs: 1,
+        })
+        .await
+        .context("CreateQuote")?
+        .into_inner();
+    anyhow::ensure!(
+        quote.buyer_claim_address == buyer_receive.to_string(),
+        "buyer_claim_address mismatch"
+    );
 
-    let create_deadline = Instant::now() + Duration::from_secs(60);
-    let mut mine_interval = tokio::time::interval(Duration::from_secs(1));
-    let swap_resp = loop {
-        if Instant::now() >= create_deadline {
-            anyhow::bail!("timeout waiting for CreateSwap to return");
-        }
+    let swap = {
+        let mut create_fut = Box::pin(swap_client.create_swap(CreateSwapRequest {
+            quote_id: quote.quote_id.clone(),
+        }));
 
-        tokio::select! {
-            resp = &mut create_fut => {
-                break resp.context("CreateSwap")?.into_inner();
+        let create_deadline = Instant::now() + Duration::from_secs(60);
+        let mut mine_interval = tokio::time::interval(Duration::from_secs(1));
+        loop {
+            if Instant::now() >= create_deadline {
+                anyhow::bail!("timeout waiting for CreateSwap to return");
             }
-            _ = mine_interval.tick() => {
-                env.elementsd_generate(1);
+
+            tokio::select! {
+                resp = &mut create_fut => {
+                    break resp.context("CreateSwap")?.into_inner();
+                }
+                _ = mine_interval.tick() => {
+                    env.elementsd_generate(1);
+                }
             }
         }
     };
 
-    let swap = swap_resp.swap.context("missing swap")?;
-    let liquid = swap.liquid.clone().context("missing liquid details")?;
+    anyhow::ensure!(swap.quote_id == quote.quote_id, "quote_id mismatch");
 
     let invoice_hash = payment_hash_from_bolt11(&swap.bolt11_invoice).context("parse invoice")?;
     let resp_hash = hex::decode(&swap.payment_hash).context("decode payment_hash")?;
@@ -366,115 +387,40 @@ async fn ln_to_liquid_swap_create_pay_claim() -> Result<()> {
         .map_err(|_| anyhow::anyhow!("payment_hash must be 32 bytes"))?;
     anyhow::ensure!(invoice_hash == resp_hash, "payment_hash mismatch");
 
-    let witness_script = lwk_wollet::elements::Script::from(liquid.witness_script.clone());
-    let spec = ln_liquid_swap::liquid::htlc::HtlcSpec::parse_witness_script(&witness_script)
-        .context("parse witness script")?;
-    anyhow::ensure!(
-        spec.payment_hash == invoice_hash,
-        "witness script hash mismatch"
-    );
-    anyhow::ensure!(
-        spec.buyer_pubkey_hash160
-            == ln_liquid_swap::liquid::htlc::pubkey_hash160_from_p2wpkh_address(&buyer_receive)
-                .context("extract buyer pubkey hash")?,
-        "witness script buyer key mismatch"
-    );
-    anyhow::ensure!(
-        spec.refund_lock_height == liquid.refund_lock_height,
-        "witness script refund lock mismatch"
-    );
-
-    let expected_p2wsh = lwk_wollet::elements::Address::p2wsh(
-        &witness_script,
-        None,
-        ElementsNetwork::default_regtest().address_params(),
-    );
-
-    let funding_txid =
-        lwk_wollet::elements::Txid::from_str(&liquid.funding_txid).context("parse funding_txid")?;
-    let funding_tx = buyer_wallet
-        .get_transaction(&funding_txid)
-        .context("fetch funding tx")?;
-
-    let asset_out = funding_tx
-        .output
-        .get(liquid.asset_vout as usize)
-        .context("asset_vout out of range")?;
-    anyhow::ensure!(
-        asset_out.script_pubkey == expected_p2wsh.script_pubkey(),
-        "asset output script mismatch"
-    );
-
-    let lbtc_out = funding_tx
-        .output
-        .get(liquid.lbtc_vout as usize)
-        .context("lbtc_vout out of range")?;
-    anyhow::ensure!(
-        lbtc_out.script_pubkey == expected_p2wsh.script_pubkey(),
-        "lbtc output script mismatch"
-    );
-
-    match asset_out.asset {
-        lwk_wollet::elements::confidential::Asset::Explicit(a) if a == asset_id => {}
-        other => anyhow::bail!("asset output must be explicit for asset_id, got {other:?}"),
-    }
-    match asset_out.value {
-        lwk_wollet::elements::confidential::Value::Explicit(v) if v == liquid.asset_amount => {}
-        other => anyhow::bail!("asset output must be explicit for asset_amount, got {other:?}"),
-    }
-
-    let policy_asset = buyer_wallet.policy_asset();
-    match lbtc_out.asset {
-        lwk_wollet::elements::confidential::Asset::Explicit(a) if a == policy_asset => {}
-        other => anyhow::bail!("lbtc output must be explicit for policy asset, got {other:?}"),
-    }
-    match lbtc_out.value {
-        lwk_wollet::elements::confidential::Value::Explicit(v) if v == liquid.fee_subsidy_sats => {}
-        other => anyhow::bail!("lbtc output must be explicit for fee_subsidy_sats, got {other:?}"),
-    }
-
-    // Pay invoice from alice.
-    let buyer_ln = LdkLightningClient::new(alice.rest_service_address().to_string());
-    let payment_id = buyer_ln
-        .pay_invoice(swap.bolt11_invoice.clone())
+    let pay_resp = swap_client
+        .pay_lightning(PayLightningRequest {
+            swap_id: swap.swap_id.clone(),
+            payment_timeout_secs: 60,
+        })
         .await
-        .context("pay invoice")?;
-    let preimage = buyer_ln
-        .wait_preimage(&payment_id, Duration::from_secs(60))
-        .await
-        .context("wait preimage")?;
+        .context("PayLightning")?
+        .into_inner();
 
+    let preimage: [u8; 32] = pay_resp
+        .preimage
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("preimage must be 32 bytes"))?;
     anyhow::ensure!(sha256_preimage(&preimage) == resp_hash, "preimage mismatch");
 
-    let funding = HtlcFunding {
-        funding_txid,
-        asset_vout: liquid.asset_vout,
-        lbtc_vout: liquid.lbtc_vout,
-        asset_id,
-        asset_amount: liquid.asset_amount,
-        policy_asset: buyer_wallet.policy_asset(),
-        fee_subsidy_sats: liquid.fee_subsidy_sats,
-    };
-
-    let buyer_secret_key =
-        derive_secret_key(buyer_wallet.signer(), 0).context("derive buyer key")?;
-    let claim_tx = claim_tx_from_witness_script(
-        &witness_script,
-        &funding,
-        &buyer_receive,
-        &buyer_secret_key,
-        preimage,
-        500,
-    )
-    .context("build claim tx")?;
-
-    let claim_txid = buyer_wallet
-        .broadcast_transaction(&claim_tx)
-        .context("broadcast claim tx")?;
+    let claim_resp = swap_client
+        .claim_asset(ClaimAssetRequest {
+            swap_id: swap.swap_id.clone(),
+            claim_fee_sats: 500,
+        })
+        .await
+        .context("ClaimAsset")?
+        .into_inner();
+    let claim_txid = claim_resp.claim_txid;
     env.elementsd_generate(1);
-    buyer_wallet.sync().context("sync buyer after claim")?;
+    buyer_wallet
+        .lock()
+        .expect("wallet mutex poisoned")
+        .sync()
+        .context("sync buyer after claim")?;
 
     let buyer_asset_after = buyer_wallet
+        .lock()
+        .expect("wallet mutex poisoned")
         .balance(&asset_id)
         .context("buyer asset balance after")?;
     anyhow::ensure!(

@@ -7,16 +7,28 @@ This repository's swap API is intentionally **gRPC-only**.
 
 ## Conventions
 
-- Prefer explicit request/response message types, even for simple RPCs.
+- Prefer explicit request message types (even for simple RPCs).
+- For Get/Create, returning the resource message directly is acceptable.
 - Validate inputs with Protovalidate where possible.
 - Document expected error codes and preconditions in `.proto` comments.
 
 ## `SwapService`
 
-The swap seller implements `SwapService` and exposes it over gRPC.
-The buyer calls:
+The swap server implements `SwapService` and exposes it over gRPC.
+This single service expresses both buyer-side and seller-side actions.
 
-- `GetOffer`: fetch pricing/policy for an asset (no HTLC funding side-effects).
-- `CreateSwap`: create a swap and return the invoice + Liquid HTLC details.
-  - Buyers should set `CreateSwapRequest.max_total_price_msat` to prevent overpaying.
+Each RPC is intentionally small and single-purpose:
+
+- `CreateQuote`: create a quote snapshot (price/policy) for an `asset_id` and `asset_amount`.
+- `GetQuote`: fetch a quote by `quote_id`.
+- `CreateSwap`: create and fund the Liquid HTLC for a previously created quote.
+  - Returns a `Swap` containing the BOLT11 invoice and Liquid HTLC details.
 - `GetSwap`: fetch swap status/details by `swap_id`.
+- `PayLightning`: pay the swap invoice and persist the preimage to the swap record.
+- `ClaimAsset`: claim the Liquid HTLC (asset acquisition) using the stored preimage and buyer signature.
+
+Server-side safety rules:
+
+- `CreateSwap` is idempotent per `quote_id` (returns the existing swap when already created).
+- `CreateSwap` rejects when the current offer differs from the quoted offer (`offer_id` mismatch).
+- `PayLightning` and `ClaimAsset` are idempotent per `swap_id` (returns persisted results when already done).

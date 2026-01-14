@@ -5,7 +5,7 @@
 
 - 売り手は Liquid 側で HTLC を fund し、invoice を発行する。
 - 買い手は funding を検証してから invoice を支払い、preimage で HTLC を claim する。
-- 価格は seller が設定し、`GetOffer` で提示する。buyer は `CreateSwapRequest.max_total_price_msat` で過払いを防止する。
+- 価格は seller が設定し、buyer は `CreateQuote` で見積もりを取得する。`CreateSwap` は `quote_id` を受け取り、見積もり取得後に条件が変化していれば拒否する。
 
 完全な原子性は提供しない。想定は regtest / 検証環境である。
 
@@ -28,8 +28,8 @@ nix develop -c just ci
 
 ## Binaries
 
-- 売り手サーバ（gRPC）: `swap_seller`
-- 買い手クライアント（CLI）: `swap_buyer`
+- gRPC server: `swap_server`
+- CLI: `swap_cli`
 
 実行例は `docs/swap/ln-liquid-swap.mdx` を参照する。
 
@@ -40,7 +40,7 @@ nix develop -c just ci
 ```sh
 echo 'export RUST_LOG=debug' > .envrc.local
 direnv allow
-nix develop -c cargo run --bin swap_seller -- --help
+nix develop -c cargo run --bin swap_server -- --help
 ```
 
 ## Protobuf（Buf）

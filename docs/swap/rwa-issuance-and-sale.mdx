@@ -11,29 +11,27 @@ description: Liquid で RWA アセットを発行し、LN→Liquid Swap（gRPC�
 - 外部 API は gRPC のみです（HTTP JSON は提供しません）。
 - gRPC の TLS と認証/認可は実装していません（閉域運用前提）。
 - HTLC outputs は explicit（unblinded）です（プライバシー要件がある場合は注意）。
-- 現状の `swap_seller` / `swap_buyer` は `ElementsNetwork::default_regtest()` 固定です。
+- 現状の `swap_server` / `swap_cli` は `ElementsNetwork::default_regtest()` 固定です。
   - この runbook も Liquid regtest を前提にします。
 
 ## 価格の決め方と事前提示（最小）
 
 この swap では **価格は Seller が決めます**。Buyer は次の 2 段で価格を知ります。
 
-1. `GetOffer` で `price_msat_per_asset_unit` を取得する（価格提示 RPC）
-2. `CreateSwap` では `max_total_price_msat` を指定し、上限を超えたら `INVALID_ARGUMENT` で落とす（過払い防止）
+1. `CreateQuote` で見積もり（`total_price_msat`）を取得する（quote RPC）
+2. `CreateSwap` は `quote_id` を受け取り、見積もり取得後に条件が変化していれば拒否する（過払い防止）
 
-`swap_buyer` はこれを自動で行います。
-
-## 役割（Seller / Buyer）
+## 役割（Swap server / CLI）
 
 この runbook では、登場人物を次の 2 つに分けます。
 
-- **Seller（売り手）**
-  - `swap_seller`（gRPC サーバ）を運用します。
-  - LWK ウォレットで RWA アセット在庫と LBTC（手数料補助）を管理します。
-  - `CreateSwap` 要求に対して HTLC funding tx を作成・放流し、invoice を返します。
-- **Buyer（買い手）**
-  - `swap_buyer`（CLI）で購入します。
-  - LN で invoice を支払い、得た preimage で Liquid HTLC を claim します。
+- **Swap server**
+  - `swap_server`（gRPC サーバ）を運用します。
+  - seller/buyer の操作を単一の gRPC server で表現します。
+  - seller 側の在庫（RWA + LBTC）を管理し、HTLC funding tx と invoice を作成します。
+  - buyer 側の LN 支払いと Liquid claim も実行します（最小構成）。
+- **CLI user**
+  - `swap_cli`（CLI）で `CreateQuote` / `CreateSwap` / `PayLightning` / `ClaimAsset` を呼び出します。
 
 ## 全体像
 
@@ -44,17 +42,17 @@ description: Liquid で RWA アセットを発行し、LN→Liquid Swap（gRPC�
 - **Lightning 側**
   - `ldk-server`（seller: invoice 発行、buyer: 支払い）
 - **Swap**
-  - 売り手サーバ: `swap_seller`（gRPC）
-  - 買い手クライアント: `swap_buyer`（CLI）
+  - gRPC server: `swap_server`
+  - CLI: `swap_cli`
 
 ## Seller: 何を用意すればよいか（チェックリスト）
 
 - LN（seller 側）:
-  - `ldk-server` の REST が到達可能であること（`--ldk-rest-addr`）
+  - `ldk-server` の REST が到達可能であること（`--seller-ldk-rest-addr`）
   - invoice を発行できること
 - Liquid:
   - Electrum が到達可能であること（`--liquid-electrum-url`）
-  - LWK ウォレットの永続ディレクトリ（`--wallet-dir`）
+  - LWK ウォレットの永続ディレクトリ（`--seller-wallet-dir`）
   - swap 永続 DB（SQLite, `--store-path`）
 - 販売条件:
   - `--sell-asset-id`: RWA の `asset_id`
@@ -67,11 +65,11 @@ description: Liquid で RWA アセットを発行し、LN→Liquid Swap（gRPC�
 ## Buyer: 何を用意すればよいか（チェックリスト）
 
 - LN（buyer 側）:
-  - `ldk-server` の REST が到達可能であること（`--ldk-rest-addr`）
+  - `ldk-server` の REST が到達可能であること（`--buyer-ldk-rest-addr`）
   - seller へ支払える outbound liquidity があること
 - Liquid:
   - Electrum が到達可能であること（`--liquid-electrum-url`）
-  - LWK ウォレットの永続ディレクトリ（`--wallet-dir`）
+  - LWK ウォレットの永続ディレクトリ（`--buyer-wallet-dir`）
 - 購入条件:
   - `--asset-id`: RWA の `asset_id`（seller の `--sell-asset-id` と一致）
   - `--asset-amount`: 購入量
@@ -85,7 +83,7 @@ Seller/Buyer はそれぞれ次を用意してください。
 - `*_MNEMONIC`: BIP39 mnemonic（例: 12 words）
 - `*_SLIP77`: 32 bytes の hex（64文字）
   - 例: `openssl rand -hex 32`
-- `--wallet-dir`: LWK の永続ディレクトリ（再起動後の復旧に必要）
+- `--seller-wallet-dir` / `--buyer-wallet-dir`: LWK の永続ディレクトリ（再起動後の復旧に必要）
 - `--liquid-electrum-url`: Electrum エンドポイント（例: `tcp://127.0.0.1:50001`）
 
 注意:
@@ -115,9 +113,9 @@ nix develop -c just swap_e2e
 KEEP_LWK_E2E_ARTIFACTS=1 KEEP_LDK_E2E_ARTIFACTS=1 nix develop -c just swap_e2e
 ```
 
-## 手順 B: swap_seller を起動して販売する（サービス開始手順）
+## 手順 B: swap_server を起動して販売する（サービス開始手順）
 
-ここからは `swap_seller` を長時間起動し、gRPC API で販売する手順です。
+ここからは `swap_server` を長時間起動し、gRPC API で販売する手順です。
 LN / Liquid の各コンポーネントはすでに起動済みであることを前提にします。
 
 ### Seller 1) RWA を発行する（asset_id を得る）
@@ -135,33 +133,37 @@ RWA は Liquid の issued asset として表現します。
 
 ### Seller 2) Seller の在庫を用意する（asset + LBTC）
 
-`swap_seller` は LWK ウォレット（`--seller-mnemonic` / `--seller-slip77`）から HTLC を fund します。
+`swap_server` は LWK ウォレット（`--seller-mnemonic` / `--seller-slip77`）から HTLC を fund します。
 そのため、事前に seller ウォレットへ次を入れてください。
 
 - 販売する RWA アセット（`asset_id`）
 - 手数料補助用の LBTC（`fee_subsidy_sats` × 想定 swap 数 + 余裕）
 
-在庫を送る先（seller 受領アドレス）は、`swap_seller` 起動時にログへ出力されます。
+在庫を送る先（seller 受領アドレス）は、`swap_server` 起動時にログへ出力されます。
 （`seller_receive_address=...`）
 
 メモ:
 
-- `swap_seller` を起動したまま在庫を入れても構いません（次回の `CreateSwap` から利用されます）。
+- `swap_server` を起動したまま在庫を入れても構いません（次回の `CreateSwap` から利用されます）。
 - 在庫が不足している場合、`CreateSwap` は `FAILED_PRECONDITION` で失敗します。
 
-### Seller 3) swap_seller を起動する
+### Server 3) swap_server を起動する
 
 例（gRPC は plaintext、SQLite 永続化あり）:
 
 ```sh
-nix develop -c cargo run --bin swap_seller -- \
+nix develop -c cargo run --bin swap_server -- \
   --listen-addr 127.0.0.1:50051 \
-  --ldk-rest-addr http://127.0.0.1:3001 \
+  --seller-ldk-rest-addr http://127.0.0.1:3001 \
+  --buyer-ldk-rest-addr http://127.0.0.1:3002 \
   --liquid-electrum-url tcp://127.0.0.1:50001 \
-  --wallet-dir ./data/seller_wallet \
-  --store-path ./data/swap_store.sqlite3 \
+  --seller-wallet-dir ./data/seller_wallet \
+  --buyer-wallet-dir ./data/buyer_wallet \
+  --store-path ./data/store.sqlite3 \
   --seller-mnemonic "$SELLER_MNEMONIC" \
   --seller-slip77 "$SELLER_SLIP77" \
+  --buyer-mnemonic "$BUYER_MNEMONIC" \
+  --buyer-slip77 "$BUYER_SLIP77" \
   --sell-asset-id "$RWA_ASSET_ID" \
   --price-msat-per-asset-unit 1000 \
   --fee-subsidy-sats 10000 \
@@ -171,45 +173,45 @@ nix develop -c cargo run --bin swap_seller -- \
 
 メモ:
 
-- `--wallet-dir` と `--store-path` は **永続領域**に置きます（再起動後の復旧に必要です）。
+- `--seller-wallet-dir` / `--buyer-wallet-dir` と `--store-path` は **永続領域**に置きます（再起動後の復旧に必要です）。
 - `--sell-asset-id` は、手順 1) で発行した RWA の `asset_id` です。
 - `--listen-addr` は閉域内でのみ公開してください（TLS/認証なしのため）。
 
-### Buyer 1) buyer が購入する（swap_buyer）
+### CLI 1) 購入する（swap_cli）
 
-Buyer は次を用意してください。
+`swap_cli` は gRPC を呼び出すだけの CLI です。
+buyer/seller のウォレットと LN ノードは `swap_server` 側に設定します。
 
-- outbound 支払い可能な LN ノード（`ldk-server`）
-- LWK ウォレットの永続ディレクトリ（`--wallet-dir`）
-
-buyer は `swap_buyer` を使うと、次を自動で行います。
-
-- `GetOffer` で価格（`price_msat_per_asset_unit`）を取得する
-- `max_total_price_msat = asset_amount * price_msat_per_asset_unit` を設定して `CreateSwap` を呼ぶ（過払い防止）
-- `CreateSwap` 呼び出し
-- LN 支払い前の安全検証（invoice と HTLC の照合、funding tx 検証、confirmations 検証）
-- invoice 支払い（`ldk-server`）
-- preimage で Liquid HTLC を claim
+例:
 
 ```sh
-nix develop -c cargo run --bin swap_buyer -- \
-  --seller-grpc-url http://127.0.0.1:50051 \
-  --ldk-rest-addr http://127.0.0.1:3002 \
-  --liquid-electrum-url tcp://127.0.0.1:50001 \
-  --wallet-dir ./data/buyer_wallet \
-  --buyer-mnemonic "$BUYER_MNEMONIC" \
-  --buyer-slip77 "$BUYER_SLIP77" \
+nix develop -c cargo run --bin swap_cli -- \
+  --grpc-url http://127.0.0.1:50051 \
+  create-quote \
   --asset-id "$RWA_ASSET_ID" \
   --asset-amount 1000 \
   --min-funding-confs 1
-```
 
-`swap_buyer` は起動時に `buyer_receive_address=...` をログ出力します。
+nix develop -c cargo run --bin swap_cli -- \
+  --grpc-url http://127.0.0.1:50051 \
+  create-swap \
+  --quote-id "<QUOTE_ID>"
+
+nix develop -c cargo run --bin swap_cli -- \
+  --grpc-url http://127.0.0.1:50051 \
+  pay-lightning \
+  --swap-id "<SWAP_ID>"
+
+nix develop -c cargo run --bin swap_cli -- \
+  --grpc-url http://127.0.0.1:50051 \
+  claim-asset \
+  --swap-id "<SWAP_ID>"
+```
 
 ## 運用ノート
 
 - `CreateSwap` は `min_funding_confs` を満たすまでブロックします（長時間 RPC になり得ます）。
-- refund は seller プロセス内の worker が定期実行します（best-effort）。
+- refund は `swap_server` プロセス内の worker が定期実行します（best-effort）。
 - ログは `RUST_LOG=info` などで調整できます。
-- 価格を変更したい場合は `swap_seller` の `--price-msat-per-asset-unit` を変更して再起動します。
-  - Buyer は毎回 `GetOffer` を呼び、`max_total_price_msat` を設定してください。
+- 価格を変更したい場合は `swap_server` の `--price-msat-per-asset-unit` を変更して再起動します。
+  - Buyer は毎回 `CreateQuote` からやり直してください。

@@ -66,8 +66,35 @@ actions
 operational principle
     after init [ ]
         => [ ]
-    then Shell/request [ command: "RUST_LOG=debug cargo run --bin swap_seller -- --help" ]
+    then Shell/request [ command: "RUST_LOG=debug cargo run --bin swap_server -- --help" ]
         => [ ]
+```
+
+```text
+concept SwapCli
+purpose
+    LN→Liquid swap を CLI から操作できるようにする。
+    CLI は gRPC server を呼び出す。
+state
+    grpc_url: string
+actions
+    create_quote [ asset_id: string; asset_amount: uint64; min_funding_confs: uint32 ]
+        => [ quote_id: string ]
+    get_quote [ quote_id: string ]
+        => [ found: boolean ]
+    create_swap [ quote_id: string ]
+        => [ swap_id: string ]
+    get_swap [ swap_id: string ]
+        => [ found: boolean ]
+    pay_lightning [ swap_id: string ]
+        => [ payment_id: string ]
+    claim_asset [ swap_id: string ]
+        => [ claim_txid: string ]
+operational principle
+    after create_quote [ asset_id: "<ASSET_ID>"; asset_amount: 1000; min_funding_confs: 1 ]
+        => [ quote_id: "<UUID>" ]
+    then create_swap [ quote_id: "<UUID>" ]
+        => [ swap_id: "<UUID>" ]
 ```
 
 ```text
@@ -75,48 +102,100 @@ concept LnLiquidSwap
 purpose
     LN の invoice 支払いと Liquid HTLC（P2WSH）を結合した swap を提供する。
     本実装は完全な原子性を提供しない。
+    buyer と seller の操作は、単一の gRPC server（単一の Protobuf service）として表現する。
 state
     proto_file: string
 actions
-    get_offer [ asset_id: string ]
-        => [ price_msat_per_asset_unit: uint64; fee_subsidy_sats: uint64; refund_delta_blocks: uint32; invoice_expiry_secs: uint32; max_min_funding_confs: uint32 ]
-        buyer SHOULD call `get_offer` before `create_swap` to discover pricing without funding an HTLC
-    create_swap [ asset_id: string; asset_amount: uint64; buyer_claim_address: string; min_funding_confs: uint32; max_total_price_msat: uint64 ]
+    create_quote [ asset_id: string; asset_amount: uint64; min_funding_confs: uint32 ]
+        => [ quote_id: string; offer_id: string; total_price_msat: uint64 ]
+        seller MUST compute `total_price_msat = asset_amount * price_msat_per_asset_unit`
+        seller MUST persist the quote so it can be resolved by `quote_id`
+    get_quote [ quote_id: string ]
+        => [ found: boolean ]
+    create_swap [ quote_id: string ]
         => [ swap_id: string; bolt11_invoice: string; payment_hash: string; funding_txid: string; p2wsh_address: string ]
+        seller MUST resolve `quote_id` to a persisted quote
+        seller MUST reject if the current offer differs from the quote (`offer_id` mismatch)
+        seller MUST lock the asset output and the LBTC fee subsidy output into the same P2WSH HTLC
+        HTLC outputs MUST be explicit (unblinded) in this minimal design
         seller MUST fund the Liquid HTLC before returning `bolt11_invoice`
-        seller MUST compute invoice amount as `asset_amount * price_msat_per_asset_unit`
-        seller MUST reject if `max_total_price_msat != 0` and invoice amount exceeds `max_total_price_msat`
-        buyer MUST verify funding and hash matches before paying `bolt11_invoice`
+        seller MUST set invoice amount to `Quote.total_price_msat`
     get_swap [ swap_id: string ]
         => [ found: boolean ]
+    pay_lightning [ swap_id: string ]
+        => [ payment_id: string ]
+        buyer MUST pay `Swap.bolt11_invoice` via the configured LN node
+        buyer MUST verify `SHA256(preimage) == Swap.payment_hash` before persisting the payment result
+    claim_asset [ swap_id: string ]
+        => [ claim_txid: string ]
+        buyer MUST build a claim tx that spends the HTLC with:
+            - the preimage, and
+            - the buyer signature (preimage-only spend MUST NOT be allowed)
+        buyer MUST broadcast the claim tx on Liquid
 operational principle
-    after get_offer [ asset_id: "<ASSET_ID>" ]
-        => [ price_msat_per_asset_unit: 1000 ]
-    then create_swap [ asset_id: "<ASSET_ID>"; asset_amount: 1000; buyer_claim_address: "<ADDR>"; min_funding_confs: 1; max_total_price_msat: 1000000 ]
+    after create_quote [ asset_id: "<ASSET_ID>"; asset_amount: 1000; min_funding_confs: 1 ]
+        => [ quote_id: "<UUID>"; total_price_msat: 1000000 ]
+    then create_swap [ quote_id: "<UUID>" ]
         => [ swap_id: "<UUID>" ]
+    then pay_lightning [ swap_id: "<UUID>" ]
+        => [ payment_id: "<UUID>" ]
+    then claim_asset [ swap_id: "<UUID>" ]
+        => [ claim_txid: "<TXID>" ]
     then get_swap [ swap_id: "<UUID>" ]
         => [ found: true ]
 ```
 
 ```text
-concept SqliteSwapStore
+concept LiquidHtlc
 purpose
-    swap の復旧に必要な最小データを SQLite へ永続化する。
+    Liquid の P2WSH HTLC（hashlock + CLTV）を提供する。
+    LN invoice の payment hash と一致する hashlock を埋め込む。
+state
+    payment_hash: bytes
+    buyer_pubkey_hash160: bytes
+    seller_pubkey_hash160: bytes
+    refund_lock_height: uint32
+actions
+    build [ payment_hash: bytes; buyer_pubkey_hash160: bytes; seller_pubkey_hash160: bytes; refund_lock_height: uint32 ]
+        => [ witness_script: bytes; p2wsh_address: string ]
+        witness_script MUST use `OP_SHA256` for hashlock
+        witness_script MUST use `OP_CHECKLOCKTIMEVERIFY` for timelock (CLTV)
+        claim path MUST require buyer signature (preimage-only spend MUST NOT be allowed)
+        refund path MUST require seller signature and CLTV
+operational principle
+    after build [ payment_hash: "<HASH>"; buyer_pubkey_hash160: "<PKH>"; seller_pubkey_hash160: "<PKH>"; refund_lock_height: 1000 ]
+        => [ p2wsh_address: "<ADDR>" ]
+```
+
+```text
+concept SqliteStore
+purpose
+    quote と swap の復旧に必要な最小データを SQLite へ永続化する。
 state
     store_path: string
 actions
     open [ store_path: string ]
         => [ ok: boolean ]
+    insert_quote [ quote_id: string ]
+        => [ ok: boolean ]
+    get_quote [ quote_id: string ]
+        => [ found: boolean ]
     insert_swap [ swap_id: string ]
         => [ ok: boolean ]
     get_swap [ swap_id: string ]
         => [ found: boolean ]
-    update_status [ swap_id: string; status: string ]
+    update_swap_status [ swap_id: string; status: string ]
+        => [ ok: boolean ]
+    upsert_swap_payment [ swap_id: string ]
+        => [ ok: boolean ]
+    upsert_swap_claim [ swap_id: string ]
         => [ ok: boolean ]
     list_swaps [ ]
         => [ count: uint32 ]
 operational principle
     after open [ store_path: "<TMP>/swap_store.sqlite3" ]
+        => [ ok: true ]
+    then insert_quote [ quote_id: "quote-a" ]
         => [ ok: true ]
     then insert_swap [ swap_id: "swap-a" ]
         => [ ok: true ]

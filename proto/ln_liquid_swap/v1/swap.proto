@@ -20,32 +20,37 @@ import "google/api/field_behavior.proto";
 // - This swap provides "practical atomicity", not full atomicity.
 // - HTLC outputs are explicit (unblinded) in this minimal design.
 service SwapService {
-  // Gets the current offer (pricing and policy parameters) for an asset.
+  // Creates a quote for a potential swap.
   //
-  // This RPC exists so buyers can learn pricing without forcing the seller to fund an HTLC
-  // (unlike `CreateSwap`).
+  // This RPC is used to discover the current price and policy parameters without funding an HTLC.
   //
   // Errors:
-  // - `INVALID_ARGUMENT` if `asset_id` is malformed or unsupported.
-  rpc GetOffer(GetOfferRequest) returns (Offer);
+  // - `INVALID_ARGUMENT` if the request is malformed or fails validation.
+  // - `FAILED_PRECONDITION` if the seller does not support the given asset id.
+  rpc CreateQuote(CreateQuoteRequest) returns (Quote);
 
-  // Creates a new swap and returns the details needed for the buyer.
+  // Gets a quote by id.
+  //
+  // Errors:
+  // - `INVALID_ARGUMENT` if `quote_id` is malformed.
+  // - `NOT_FOUND` if the quote does not exist.
+  rpc GetQuote(GetQuoteRequest) returns (Quote);
+
+  // Creates a new swap from a previously created quote.
   //
   // Server behavior (minimal implementation):
+  // - Resolves `quote_id` into a persisted quote.
+  // - Rejects if the current offer differs from the quote.
   // - Funds the Liquid HTLC and broadcasts the funding transaction.
   // - Waits until the funding transaction has at least `min_funding_confs` confirmations.
   // - Returns the BOLT11 invoice and the Liquid HTLC details.
   //
-  // Buyer safety checks (MUST):
-  // - Verify the invoice payment hash matches `payment_hash` and the HTLC witness script.
-  // - Verify the funding transaction outputs match the returned P2WSH script and amounts.
-  // - Verify the funding transaction has at least `min_funding_confs` confirmations.
-  //
   // Errors:
   // - `INVALID_ARGUMENT` if the request is malformed or fails validation.
-  // - `FAILED_PRECONDITION` if the seller cannot fund the HTLC (e.g., insufficient inventory).
+  // - `NOT_FOUND` if the quote does not exist.
+  // - `FAILED_PRECONDITION` if the offer changed since quoting, or if the seller cannot fund.
   // - `INTERNAL` for unexpected wallet / backend failures.
-  rpc CreateSwap(CreateSwapRequest) returns (CreateSwapResponse);
+  rpc CreateSwap(CreateSwapRequest) returns (Swap);
 
   // Gets a swap by id.
   //
@@ -53,10 +58,30 @@ service SwapService {
   // - `INVALID_ARGUMENT` if `swap_id` is malformed.
   // - `NOT_FOUND` if the swap does not exist.
   rpc GetSwap(GetSwapRequest) returns (Swap);
+
+  // Pays the Lightning invoice for a swap and returns the payment result.
+  //
+  // Errors:
+  // - `INVALID_ARGUMENT` if the request is malformed or fails validation.
+  // - `NOT_FOUND` if the swap does not exist.
+  // - `FAILED_PRECONDITION` if the swap is not funded.
+  // - `INTERNAL` for unexpected LN backend failures.
+  rpc PayLightning(PayLightningRequest) returns (PayLightningResponse);
+
+  // Claims the Liquid HTLC for a swap (asset acquisition).
+  //
+  // Errors:
+  // - `INVALID_ARGUMENT` if the request is malformed or fails validation.
+  // - `NOT_FOUND` if the swap does not exist.
+  // - `FAILED_PRECONDITION` if the swap has not been paid yet (missing preimage).
+  // - `INTERNAL` for unexpected wallet / backend failures.
+  rpc ClaimAsset(ClaimAssetRequest) returns (ClaimAssetResponse);
 }
 
-message CreateSwapRequest {
+message CreateQuoteRequest {
   // The asset id (32 bytes, hex-encoded).
+  //
+  // Current implementation supports exactly one sellable asset id.
   string asset_id = 1 [
     (google.api.field_behavior) = REQUIRED,
     (buf.validate.field).required = true,
@@ -69,54 +94,76 @@ message CreateSwapRequest {
   // Must be greater than 0.
   uint64 asset_amount = 2 [(buf.validate.field).uint64.gt = 0];
 
-  // The Liquid address that will receive the claimed outputs.
-  //
-  // This design expects a P2WPKH address (v0 witness program, 20 bytes).
-  string buyer_claim_address = 3 [
-    (google.api.field_behavior) = REQUIRED,
-    (buf.validate.field).required = true,
-    (buf.validate.field).string.min_len = 1,
-    (buf.validate.field).string.max_len = 128
-  ];
-
   // The minimum required confirmations for the HTLC funding transaction.
   //
   // If this value is 0, the server may return once the funding transaction is visible to the
   // Liquid backend (typically mempool).
   //
   // The server may reject excessively large values to avoid long-running requests.
-  uint32 min_funding_confs = 4 [(buf.validate.field).uint32.lte = 6];
-
-  // The maximum total price (in millisatoshis) the buyer is willing to pay.
-  //
-  // If `max_total_price_msat` is set to 0, the server does not enforce an upper bound.
-  //
-  // The server computes:
-  // - `total_price_msat = asset_amount * price_msat_per_asset_unit`
-  //
-  // and rejects the request with `INVALID_ARGUMENT` if:
-  // - `total_price_msat > max_total_price_msat`
-  //
-  // This protects buyers from overpaying if the seller's price changes between:
-  // - `GetOffer`, and
-  // - `CreateSwap` retry attempts.
-  uint64 max_total_price_msat = 5;
+  uint32 min_funding_confs = 3 [(buf.validate.field).uint32.lte = 6];
 }
 
-message CreateSwapResponse {
-  // The created swap.
-  Swap swap = 1;
-}
+message Quote {
+  // The quote id. Use this value with `GetQuote` and `CreateSwap`.
+  string quote_id = 1 [
+    (google.api.field_behavior) = REQUIRED,
+    (buf.validate.field).required = true,
+    (buf.validate.field).string.min_len = 1,
+    (buf.validate.field).string.max_len = 64,
+    (buf.validate.field).string.pattern = "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+  ];
 
-message GetOfferRequest {
-  // The asset id (32 bytes, hex-encoded).
+  // The offer snapshot id (SHA256 hex, 32 bytes).
   //
-  // Current implementation supports exactly one sellable asset id.
-  string asset_id = 1 [
+  // If the seller changes the offer parameters after issuing a quote,
+  // `CreateSwap` rejects due to `offer_id` mismatch.
+  string offer_id = 2 [
     (google.api.field_behavior) = REQUIRED,
     (buf.validate.field).required = true,
     (buf.validate.field).string.len = 64,
     (buf.validate.field).string.pattern = "^[0-9a-fA-F]{64}$"
+  ];
+
+  // The offer snapshot used to compute this quote.
+  Offer offer = 3;
+
+  // The Liquid address that will receive the claimed outputs.
+  //
+  // This design expects a P2WPKH address (v0 witness program, 20 bytes).
+  string buyer_claim_address = 4;
+
+  // The asset id being sold (hex-encoded).
+  string asset_id = 5;
+
+  // The amount of the asset to receive.
+  uint64 asset_amount = 6;
+
+  // The minimum required confirmations for the HTLC funding transaction.
+  uint32 min_funding_confs = 7;
+
+  // The total price in millisatoshis.
+  uint64 total_price_msat = 8;
+}
+
+message GetQuoteRequest {
+  // The quote id returned by `CreateQuote`.
+  string quote_id = 1 [
+    (google.api.field_behavior) = REQUIRED,
+    (buf.validate.field).required = true,
+    (buf.validate.field).string.min_len = 1,
+    (buf.validate.field).string.max_len = 64,
+    (buf.validate.field).string.pattern = "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+  ];
+}
+
+message CreateSwapRequest {
+  // The quote id returned by `CreateQuote`.
+  string quote_id = 1 [
+    (google.api.field_behavior) = REQUIRED,
+    (buf.validate.field).required = true,
+    (buf.validate.field).string.min_len = 1,
+    (buf.validate.field).string.max_len = 64,
+    (buf.validate.field).string.pattern = "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
   ];
 }
 
@@ -153,6 +200,51 @@ message GetSwapRequest {
   ];
 }
 
+message PayLightningRequest {
+  // The swap id returned by `CreateSwap`.
+  string swap_id = 1 [
+    (google.api.field_behavior) = REQUIRED,
+    (buf.validate.field).required = true,
+    (buf.validate.field).string.min_len = 1,
+    (buf.validate.field).string.max_len = 64,
+    (buf.validate.field).string.pattern = "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+  ];
+
+  // The maximum time to wait for the preimage after initiating payment (seconds).
+  //
+  // If this value is 0, the server uses a default.
+  uint32 payment_timeout_secs = 2 [(buf.validate.field).uint32.lte = 600];
+}
+
+message PayLightningResponse {
+  // The payment id returned by the LN backend.
+  string payment_id = 1;
+
+  // The preimage obtained after successful payment (32 bytes).
+  bytes preimage = 2;
+}
+
+message ClaimAssetRequest {
+  // The swap id returned by `CreateSwap`.
+  string swap_id = 1 [
+    (google.api.field_behavior) = REQUIRED,
+    (buf.validate.field).required = true,
+    (buf.validate.field).string.min_len = 1,
+    (buf.validate.field).string.max_len = 64,
+    (buf.validate.field).string.pattern = "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+  ];
+
+  // The fee to pay for the claim transaction (sats).
+  //
+  // If this value is 0, the server uses a default.
+  uint64 claim_fee_sats = 2;
+}
+
+message ClaimAssetResponse {
+  // The txid of the claim transaction (hex-encoded).
+  string claim_txid = 1;
+}
+
 // SwapStatus describes the server's view of the swap lifecycle.
 enum SwapStatus {
   SWAP_STATUS_UNSPECIFIED = 0;
@@ -161,6 +253,7 @@ enum SwapStatus {
   SWAP_STATUS_CLAIMED = 3;
   SWAP_STATUS_REFUNDED = 4;
   SWAP_STATUS_FAILED = 5;
+  SWAP_STATUS_PAID = 6;
 }
 
 message Swap {
@@ -178,6 +271,9 @@ message Swap {
 
   // Liquid-side HTLC details.
   LiquidHtlc liquid = 5;
+
+  // The quote id used to create this swap.
+  string quote_id = 6;
 }
 
 message LiquidHtlc {

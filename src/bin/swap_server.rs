@@ -12,8 +12,8 @@ use ln_liquid_swap::liquid::keys::derive_secret_key;
 use ln_liquid_swap::liquid::wallet::LiquidWallet;
 use ln_liquid_swap::proto::v1::swap_service_server::SwapServiceServer;
 use ln_liquid_swap::swap::SwapStatus;
-use ln_liquid_swap::swap::service::{SellerConfig, SwapSellerService};
-use ln_liquid_swap::swap::store::SqliteSwapStore;
+use ln_liquid_swap::swap::service::{SwapServiceConfig, SwapServiceImpl};
+use ln_liquid_swap::swap::store::SqliteStore;
 use lwk_wollet::ElementsNetwork;
 use tonic::transport::Server;
 
@@ -23,13 +23,19 @@ struct Args {
     listen_addr: String,
 
     #[arg(long)]
-    ldk_rest_addr: String,
+    seller_ldk_rest_addr: String,
+
+    #[arg(long)]
+    buyer_ldk_rest_addr: String,
 
     #[arg(long)]
     liquid_electrum_url: String,
 
     #[arg(long)]
-    wallet_dir: PathBuf,
+    seller_wallet_dir: PathBuf,
+
+    #[arg(long)]
+    buyer_wallet_dir: PathBuf,
 
     #[arg(long)]
     store_path: PathBuf,
@@ -39,6 +45,12 @@ struct Args {
 
     #[arg(long)]
     seller_slip77: String,
+
+    #[arg(long)]
+    buyer_mnemonic: String,
+
+    #[arg(long)]
+    buyer_slip77: String,
 
     #[arg(long)]
     sell_asset_id: String,
@@ -58,6 +70,9 @@ struct Args {
     #[arg(long, default_value_t = 0)]
     seller_key_index: u32,
 
+    #[arg(long, default_value_t = 0)]
+    buyer_key_index: u32,
+
     #[arg(long, default_value_t = 5)]
     refund_poll_interval_secs: u64,
 
@@ -72,7 +87,8 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     let listen_addr: SocketAddr = args.listen_addr.parse().context("parse listen_addr")?;
 
-    std::fs::create_dir_all(&args.wallet_dir).context("create wallet_dir")?;
+    std::fs::create_dir_all(&args.seller_wallet_dir).context("create seller_wallet_dir")?;
+    std::fs::create_dir_all(&args.buyer_wallet_dir).context("create buyer_wallet_dir")?;
     if let Some(parent) = args.store_path.parent() {
         std::fs::create_dir_all(parent).context("create store parent dir")?;
     }
@@ -81,16 +97,16 @@ async fn main() -> Result<()> {
         .context("parse sell_asset_id")?;
 
     let network = ElementsNetwork::default_regtest();
-    let wallet = LiquidWallet::new(
+    let seller_wallet = LiquidWallet::new(
         &args.seller_mnemonic,
         &args.seller_slip77,
         &args.liquid_electrum_url,
-        &args.wallet_dir,
+        &args.seller_wallet_dir,
         network,
     )
-    .context("create liquid wallet")?;
+    .context("create seller liquid wallet")?;
 
-    let seller_receive_address = wallet
+    let seller_receive_address = seller_wallet
         .address_at(args.seller_key_index)
         .context("get seller receive address")?;
     tracing::info!(
@@ -99,32 +115,60 @@ async fn main() -> Result<()> {
         "seller wallet ready"
     );
 
-    let store = SqliteSwapStore::open(args.store_path).context("open swap store")?;
+    let buyer_wallet = LiquidWallet::new(
+        &args.buyer_mnemonic,
+        &args.buyer_slip77,
+        &args.liquid_electrum_url,
+        &args.buyer_wallet_dir,
+        network,
+    )
+    .context("create buyer liquid wallet")?;
+    let buyer_receive_address = buyer_wallet
+        .address_at(args.buyer_key_index)
+        .context("get buyer receive address")?;
+    tracing::info!(
+        buyer_receive_address = %buyer_receive_address,
+        buyer_key_index = args.buyer_key_index,
+        "buyer wallet ready"
+    );
 
-    let wallet = Arc::new(Mutex::new(wallet));
+    let store = SqliteStore::open(args.store_path).context("open sqlite store")?;
+
+    let seller_wallet = Arc::new(Mutex::new(seller_wallet));
+    let buyer_wallet = Arc::new(Mutex::new(buyer_wallet));
     let store = Arc::new(Mutex::new(store));
 
-    let cfg = SellerConfig {
+    let cfg = SwapServiceConfig {
         sell_asset_id,
         price_msat_per_asset_unit: args.price_msat_per_asset_unit,
         fee_subsidy_sats: args.fee_subsidy_sats,
         refund_delta_blocks: args.refund_delta_blocks,
         invoice_expiry_secs: args.invoice_expiry_secs,
         seller_key_index: args.seller_key_index,
+        buyer_key_index: args.buyer_key_index,
     };
 
-    let ln = LdkLightningClient::new(args.ldk_rest_addr);
-    let svc = SwapSellerService::new(cfg.clone(), ln, wallet.clone(), store.clone());
+    let seller_ln = LdkLightningClient::new(args.seller_ldk_rest_addr);
+    let buyer_ln = LdkLightningClient::new(args.buyer_ldk_rest_addr);
+
+    let svc = SwapServiceImpl::new(
+        cfg.clone(),
+        seller_ln,
+        buyer_ln,
+        seller_wallet.clone(),
+        buyer_wallet,
+        store.clone(),
+    );
 
     spawn_refund_worker(
-        wallet.clone(),
+        seller_wallet.clone(),
         store.clone(),
-        args.seller_key_index,
+        cfg.seller_key_index,
         Duration::from_secs(args.refund_poll_interval_secs),
         args.refund_fee_sats,
     );
 
-    tracing::info!(%listen_addr, "starting swap seller gRPC server");
+    tracing::info!(%listen_addr, "starting swap gRPC server");
 
     Server::builder()
         .add_service(SwapServiceServer::new(svc))
@@ -137,7 +181,7 @@ async fn main() -> Result<()> {
 
 fn spawn_refund_worker(
     wallet: Arc<Mutex<LiquidWallet>>,
-    store: Arc<Mutex<SqliteSwapStore>>,
+    store: Arc<Mutex<SqliteStore>>,
     seller_key_index: u32,
     poll_interval: Duration,
     fee_sats: u64,
@@ -167,7 +211,7 @@ fn spawn_refund_worker(
 
 fn refund_once(
     wallet: Arc<Mutex<LiquidWallet>>,
-    store: Arc<Mutex<SqliteSwapStore>>,
+    store: Arc<Mutex<SqliteStore>>,
     seller_key_index: u32,
     fee_sats: u64,
 ) -> Result<()> {
@@ -230,7 +274,7 @@ fn refund_once(
                 tracing::info!(swap_id = %s.swap_id, refund_txid = %txid, "broadcast refund tx");
                 let mut store = store.lock().expect("store mutex poisoned");
                 store
-                    .update_status(&s.swap_id, SwapStatus::Refunded)
+                    .update_swap_status(&s.swap_id, SwapStatus::Refunded)
                     .context("update swap status (refunded)")?;
             }
             Err(err) => {
