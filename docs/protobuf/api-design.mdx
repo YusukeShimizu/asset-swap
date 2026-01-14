@@ -24,11 +24,11 @@ Each RPC is intentionally small and single-purpose:
 - `CreateSwap`: create and fund the Liquid HTLC for a previously created quote.
   - Returns a `Swap` containing the BOLT11 invoice and Liquid HTLC details.
 - `GetSwap`: fetch swap status/details by `swap_id`.
-- `PayLightning`: pay the swap invoice and persist the preimage to the swap record.
-- `ClaimAsset`: claim the Liquid HTLC (asset acquisition) using the stored preimage and buyer signature.
+- `CreateLightningPayment`: pay the swap invoice and persist the preimage to the swap record.
+- `CreateAssetClaim`: claim the Liquid HTLC (asset acquisition) using the stored preimage and buyer signature.
 
 Server-side safety rules:
 
 - `CreateSwap` is idempotent per `quote_id` (returns the existing swap when already created).
 - `CreateSwap` rejects when the current offer differs from the quoted offer (`offer_id` mismatch).
-- `PayLightning` and `ClaimAsset` are idempotent per `swap_id` (returns persisted results when already done).
+- `CreateLightningPayment` and `CreateAssetClaim` are idempotent per `swap_id` (returns persisted results when already done).

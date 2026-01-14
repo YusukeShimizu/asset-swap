@@ -1,28 +1,27 @@
 # AGENTS
 
-このリポジトリは Rust プロジェクトのテンプレートである。
+This repository is a Rust project template.
 
-## 開発原則
+## Development Principles
 
+1. `spec.md` is the source of truth.
+2. Before starting work, check `.codex/skills/` and follow any applicable Skill instructions.
+3. Reproduce the development environment with Nix Flakes (`nix develop`).
+4. Manage environment variables with direnv (`.envrc`).
+5. Express representative operations first as integration tests (`tests/`).
+6. Integration tests must not use mocks.
+7. Keep implementations single-responsibility and keep terminology consistent.
+8. Use `tracing` for logs and control verbosity with `RUST_LOG`.
+9. When you update Markdown, run `textlint`.
+10. Run the primary quality gate via `just ci`.
 
-1. 仕様は `spec.md` を正とする。
-2. 作業開始前に `.codex/skills/` を確認し、該当する Skill があれば指示に従う。
-3. 開発環境は Nix Flakes（`nix develop`）で再現する。
-4. 環境変数は direnv（`.envrc`）で管理する。
-5. 代表的な操作は Integration Test（`tests/`）で先に表現する。
-6. Integration Test は mock を使わない。
-7. 実装は単一責任を守り、用語は一貫させる。
-8. ログは `tracing` を使い、`RUST_LOG` で詳細度を制御する。
-9. 文章（Markdown）を更新したら `textlint` を実行する。
-10. 代表的な品質ゲートは `just ci` で実行する。
+## Writing and Proofreading Rules
 
-## 文書の校正ルール
-
-- 総論→各論などの論理構造を先に決める。
-- 一文一義を徹底する。
-- 主語と述語を対応させる。
-- 用語を統一する。
-- 数字・単位・記号の表記を統一する。
-- 事実と推測を区別する。
-- 不要語を削除し、簡潔に書く。
-- Mermaid を更新したら `mmdc` で変換できることを確認する。
+- Decide the logical structure first (for example: overview → details).
+- Keep one meaning per sentence.
+- Ensure subjects and predicates match.
+- Keep terminology consistent.
+- Keep numbers, units, and symbol formatting consistent.
+- Distinguish facts from speculation.
+- Remove unnecessary words and write concisely.
+- If you update Mermaid, confirm it can be converted with `mmdc`.

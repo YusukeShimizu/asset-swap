@@ -23,34 +23,22 @@ struct Args {
     listen_addr: String,
 
     #[arg(long)]
-    seller_ldk_rest_addr: String,
-
-    #[arg(long)]
-    buyer_ldk_rest_addr: String,
+    ldk_rest_addr: String,
 
     #[arg(long)]
     liquid_electrum_url: String,
 
     #[arg(long)]
-    seller_wallet_dir: PathBuf,
-
-    #[arg(long)]
-    buyer_wallet_dir: PathBuf,
+    wallet_dir: PathBuf,
 
     #[arg(long)]
     store_path: PathBuf,
 
     #[arg(long)]
-    seller_mnemonic: String,
+    mnemonic: String,
 
     #[arg(long)]
-    seller_slip77: String,
-
-    #[arg(long)]
-    buyer_mnemonic: String,
-
-    #[arg(long)]
-    buyer_slip77: String,
+    slip77: String,
 
     #[arg(long)]
     sell_asset_id: String,
@@ -87,8 +75,7 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     let listen_addr: SocketAddr = args.listen_addr.parse().context("parse listen_addr")?;
 
-    std::fs::create_dir_all(&args.seller_wallet_dir).context("create seller_wallet_dir")?;
-    std::fs::create_dir_all(&args.buyer_wallet_dir).context("create buyer_wallet_dir")?;
+    std::fs::create_dir_all(&args.wallet_dir).context("create wallet_dir")?;
     if let Some(parent) = args.store_path.parent() {
         std::fs::create_dir_all(parent).context("create store parent dir")?;
     }
@@ -97,45 +84,36 @@ async fn main() -> Result<()> {
         .context("parse sell_asset_id")?;
 
     let network = ElementsNetwork::default_regtest();
-    let seller_wallet = LiquidWallet::new(
-        &args.seller_mnemonic,
-        &args.seller_slip77,
+    let wallet = LiquidWallet::new(
+        &args.mnemonic,
+        &args.slip77,
         &args.liquid_electrum_url,
-        &args.seller_wallet_dir,
+        &args.wallet_dir,
         network,
     )
-    .context("create seller liquid wallet")?;
+    .context("create liquid wallet")?;
 
-    let seller_receive_address = seller_wallet
+    let seller_receive_address = wallet
         .address_at(args.seller_key_index)
         .context("get seller receive address")?;
     tracing::info!(
         seller_receive_address = %seller_receive_address,
         seller_key_index = args.seller_key_index,
-        "seller wallet ready"
+        "seller key ready"
     );
 
-    let buyer_wallet = LiquidWallet::new(
-        &args.buyer_mnemonic,
-        &args.buyer_slip77,
-        &args.liquid_electrum_url,
-        &args.buyer_wallet_dir,
-        network,
-    )
-    .context("create buyer liquid wallet")?;
-    let buyer_receive_address = buyer_wallet
+    let buyer_receive_address = wallet
         .address_at(args.buyer_key_index)
         .context("get buyer receive address")?;
     tracing::info!(
         buyer_receive_address = %buyer_receive_address,
         buyer_key_index = args.buyer_key_index,
-        "buyer wallet ready"
+        "buyer key ready"
     );
 
     let store = SqliteStore::open(args.store_path).context("open sqlite store")?;
 
-    let seller_wallet = Arc::new(Mutex::new(seller_wallet));
-    let buyer_wallet = Arc::new(Mutex::new(buyer_wallet));
+    let wallet = Arc::new(Mutex::new(wallet));
     let store = Arc::new(Mutex::new(store));
 
     let cfg = SwapServiceConfig {
@@ -148,20 +126,12 @@ async fn main() -> Result<()> {
         buyer_key_index: args.buyer_key_index,
     };
 
-    let seller_ln = LdkLightningClient::new(args.seller_ldk_rest_addr);
-    let buyer_ln = LdkLightningClient::new(args.buyer_ldk_rest_addr);
+    let ln = LdkLightningClient::new(args.ldk_rest_addr);
 
-    let svc = SwapServiceImpl::new(
-        cfg.clone(),
-        seller_ln,
-        buyer_ln,
-        seller_wallet.clone(),
-        buyer_wallet,
-        store.clone(),
-    );
+    let svc = SwapServiceImpl::new(cfg.clone(), ln, wallet.clone(), store.clone());
 
     spawn_refund_worker(
-        seller_wallet.clone(),
+        wallet.clone(),
         store.clone(),
         cfg.seller_key_index,
         Duration::from_secs(args.refund_poll_interval_secs),

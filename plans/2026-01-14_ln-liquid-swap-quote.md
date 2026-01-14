@@ -1,126 +1,131 @@
-# ExecPlan: LN→Liquid Swap（Quote → CreateSwap）
+# ExecPlan: LN→Liquid Swap (Quote → CreateSwap)
 
 ## Goal
 
-- buyer が `CreateQuote` で見積もり（`Quote`）を取得し、`quote_id` を指定して `CreateSwap` を呼べるようにする。
-- seller は `quote_id` が指す条件（price/policy）が **現時点でも成立する**場合のみ swap を作成して返す。
-- buyer は返却された swap 情報を検証し、LN 支払いと Liquid claim を完了できる。
+- Let the buyer request a quote via `CreateQuote` and then call `CreateSwap` by specifying the
+  returned `quote_id`.
+- Let the seller create and return a swap only when the quoted conditions (price/policy) are still
+  valid at the time of `CreateSwap`.
+- Let the buyer verify the returned swap info and complete the LN payment and Liquid claim.
 
-### 非目的
+### Non-goals
 
-- 価格の算出に外部のマーケット API を必須化しない（まずは固定パラメータでよい）。
-- gRPC/TLS、認証/認可、インターネット公開の安全設計は対象にしない（閉域運用前提）。
-- mainnet/testnet 対応は対象にしない（regtest 前提を維持する）。
+- Do not require an external market API for price computation (fixed parameters are fine at first).
+- Do not implement gRPC/TLS, authentication/authorization, or safe internet exposure (closed-network
+  assumption).
+- Do not add mainnet/testnet support (keep regtest assumptions).
 
 ## Scope
 
-### 変更対象
+### In scope
 
-- Protobuf（gRPC）:
-  - `proto/ln_liquid_swap/v1/swap.proto` に `CreateQuote` と `Quote` を追加する。
-  - `CreateSwap` は `quote_id` を受け取れるようにする（新 RPC 追加、または既存 request の拡張）。
-- seller 実装:
-  - `src/swap/service.rs` に `CreateQuote` を実装する。
-  - `CreateSwap` は `quote_id` を検証し、price/policy が一致しない場合は拒否する。
-- buyer 実装:
-  - `src/bin/swap_cli.rs` を quote フローへ更新する。
-- Integration Test:
-  - `tests/ln_liquid_swap_e2e.rs` を quote フローへ更新する。
-- 仕様と設計:
-  - `spec.md` に quote フローの action を追加し、E2E の代表シナリオを更新する。
-  - `docs/swap/ln-liquid-swap.mdx` と runbook を更新する（手順が変わるため）。
+- Protobuf (gRPC):
+  - Add `CreateQuote` and `Quote` to `proto/ln_liquid_swap/v1/swap.proto`.
+  - Make `CreateSwap` accept `quote_id` (new RPC or request extension).
+- Seller implementation:
+  - Implement `CreateQuote` in `src/swap/service.rs`.
+  - Validate `quote_id` in `CreateSwap` and reject when price/policy differs from the current
+    offer.
+- Buyer implementation:
+  - Update `src/bin/swap_cli.rs` for the quote flow.
+- Integration test:
+  - Update `tests/ln_liquid_swap_e2e.rs` for the quote flow.
+- Spec and docs:
+  - Add quote-flow actions to `spec.md` and update the representative E2E scenario.
+  - Update `docs/swap/ln-liquid-swap.mdx` and the runbook (because steps change).
 
-### 変更しない
+### Out of scope
 
-- HTLC の witness script 形式（`OP_SHA256 + OP_CHECKLOCKTIMEVERIFY`）は維持する。
-- HTLC outputs は explicit（unblinded）を維持する。
+- Keep the HTLC witness script format (`OP_SHA256 + OP_CHECKLOCKTIMEVERIFY`).
+- Keep explicit (unblinded) HTLC outputs.
 
 ## Milestones
 
-### M1: Protobuf に Quote を追加
+### M1: Add Quote to Protobuf
 
-#### 観測可能な成果
+#### Observable outcomes
 
-- `nix develop -c just proto_fmt proto_lint` が成功する。
-- `cargo test --all` がビルド段階まで通る（tonic codegen を含む）。
+- `nix develop -c just proto_fmt proto_lint` succeeds.
+- `cargo test --all` compiles through build time (including tonic codegen).
 
-#### 作業内容
+#### Work
 
-- `CreateQuoteRequest` / `Quote` を追加する。
-- `CreateSwap` の入力へ `quote_id` を導入する。
-- 代表的エラーパターン（quote 不一致、期限切れ等）をコメントへ明記する。
+- Add `CreateQuoteRequest` / `Quote`.
+- Add `quote_id` to `CreateSwap` input.
+- Document representative error patterns (quote mismatch, expiry, etc.) in `.proto` comments.
 
-### M2: seller が Quote を発行・検証できる
+### M2: Seller can issue and validate quotes
 
-#### 観測可能な成果
+#### Observable outcomes
 
-- `CreateQuote` が `total_price_msat` を返せる。
-- seller が `CreateSwap(quote_id)` を受けたとき、現在の price/policy と一致しない場合に拒否できる。
+- `CreateQuote` returns `total_price_msat`.
+- When the seller receives `CreateSwap(quote_id)`, it can reject if current price/policy does not
+  match the quote.
 
-#### 作業内容
+#### Work
 
-- seller 側で `Offer` と `offer_id`（price/policy のスナップショット ID）を定義する。
-- `CreateQuote` で `Quote(quote_id, offer_id, total_price_msat, …)` を生成する。
-- `CreateSwap` の先頭で `quote_id` を解決し、`offer_id` の一致を検証する。
+- Define `Offer` and `offer_id` (snapshot id of price/policy) on the seller side.
+- In `CreateQuote`, generate `Quote(quote_id, offer_id, total_price_msat, ...)`.
+- At the beginning of `CreateSwap`, resolve `quote_id` and validate `offer_id` match.
 
-### M3: CLI を quote フローへ更新
+### M3: Update the CLI for the quote flow
 
-#### 観測可能な成果
+#### Observable outcomes
 
-- buyer が `CreateQuote` → `CreateSwap` → `pay` → `claim` まで通せる。
-- buyer が LN 支払い前に「invoice amount == quote.total_price_msat」を検証できる。
+- The buyer can complete `CreateQuote` → `CreateSwap` → pay → claim.
+- Before paying on LN, the buyer can verify "invoice amount == quote.total_price_msat".
 
-#### 作業内容
+#### Work
 
-- `swap_cli` が `CreateQuote` を呼び、`Quote` を保持する。
-- `CreateSwap` を `quote_id` で呼ぶ。
-- 支払い前に quote と swap の整合（invoice amount、asset_amount 等）を検証する。
+- Make `swap_cli` call `CreateQuote` and keep the `Quote`.
+- Call `CreateSwap` using `quote_id`.
+- Before payment, validate quote/swap consistency (invoice amount, asset_amount, etc.).
 
-### M4: Swap E2E integration test を quote フローへ更新
+### M4: Update Swap E2E integration test for the quote flow
 
-#### 観測可能な成果
+#### Observable outcomes
 
-- `cargo test --test ln_liquid_swap_e2e -- --ignored --nocapture` が成功する。
+- `cargo test --test ln_liquid_swap_e2e -- --ignored --nocapture` succeeds.
 
-#### 作業内容
+#### Work
 
-- `tests/ln_liquid_swap_e2e.rs` の `CreateSwap` 呼び出しを `CreateQuote` 経由へ置換する。
-- 可能なら「quote を取得後に seller の price/policy を変更すると `CreateSwap` が失敗する」ことも観測する。
+- Replace `CreateSwap` calls in `tests/ln_liquid_swap_e2e.rs` with the `CreateQuote` flow.
+- If possible, also observe "if seller changes price/policy after quoting, `CreateSwap` fails".
 
-### M5: spec と docs を同期
+### M5: Sync spec and docs
 
-#### 観測可能な成果
+#### Observable outcomes
 
-- `nix develop -c just ci` が成功する。
+- `nix develop -c just ci` succeeds.
 
-#### 作業内容
+#### Work
 
-- `spec.md` の `LnLiquidSwap` concept に `create_quote` を追加する。
-- `docs/swap/ln-liquid-swap.mdx` と runbook の手順を更新する。
+- Add `create_quote` to the `LnLiquidSwap` concept in `spec.md`.
+- Update `docs/swap/ln-liquid-swap.mdx` and the runbook steps.
 
 ## Tests
 
 - `nix develop -c just ci`
 - `nix develop -c just swap_e2e`
-  - `tests/ln_liquid_swap_e2e.rs`（ignored、mock なし）
+  - `tests/ln_liquid_swap_e2e.rs` (ignored, no mocks)
 
 ## Decisions / Risks
 
-### 重要な判断
+### Key decisions
 
-- `quote_id` の実装方式を決める。
-  - 例: SQLite 永続（quote テーブル）か、署名付きトークン（ステートレス）か。
-  - 理由: 再起動時の扱いと、不要な永続化のバランスが変わるため。
-- 後方互換の扱いを決める。
-  - 例: 既存の `GetOffer` / `max_total_price_msat` を残すか、破壊的変更とするか。
+- Decide how to implement `quote_id`.
+  - Examples: persist in SQLite (quotes table) vs signed tokens (stateless).
+  - Rationale: affects restart behavior and the persistence vs stateless trade-off.
+- Decide how to handle backwards compatibility.
+  - Examples: keep `GetOffer` / `max_total_price_msat` or make a breaking change.
 
-### 既知のリスクと緩和策
+### Known risks and mitigations
 
-- リスク: quote が無制限に発行され、メモリや DB を圧迫する。
-  - 緩和: quote の TTL と上限（max inflight quotes）を導入する。
-- リスク: quote と swap の整合チェックが不足し、buyer が過払いする。
-  - 緩和: buyer 側で「invoice amount == quote.total_price_msat」を必須チェックにする。
+- Risk: unlimited quote issuance exhausts memory/DB.
+  - Mitigation: add quote TTL and caps (max inflight quotes).
+- Risk: insufficient consistency checks cause buyer overpayment.
+  - Mitigation: require buyer-side validation "invoice amount == quote.total_price_msat".
 
 ## Progress
 
-- 2026-01-14: Quote → CreateSwap フローの ExecPlan を作成した。
+- 2026-01-14: Created this ExecPlan for the Quote → CreateSwap flow.

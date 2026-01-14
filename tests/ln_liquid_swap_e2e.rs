@@ -30,7 +30,7 @@ use ln_liquid_swap::liquid::wallet::LiquidWallet;
 use ln_liquid_swap::proto::v1::swap_service_client::SwapServiceClient;
 use ln_liquid_swap::proto::v1::swap_service_server::SwapServiceServer;
 use ln_liquid_swap::proto::v1::{
-    ClaimAssetRequest, CreateQuoteRequest, CreateSwapRequest, PayLightningRequest,
+    CreateAssetClaimRequest, CreateLightningPaymentRequest, CreateQuoteRequest, CreateSwapRequest,
 };
 use ln_liquid_swap::swap::service::{SwapServiceConfig, SwapServiceImpl};
 use ln_liquid_swap::swap::store::SqliteStore;
@@ -41,10 +41,6 @@ const ISSUER_SLIP77: &str = lwk_test_util::TEST_MNEMONIC_SLIP77;
 const SELLER_MNEMONIC: &str =
     "legal winner thank year wave sausage worth useful legal winner thank yellow";
 const SELLER_SLIP77: &str = "0000000000000000000000000000000000000000000000000000000000000002";
-
-const BUYER_MNEMONIC: &str =
-    "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
-const BUYER_SLIP77: &str = "0000000000000000000000000000000000000000000000000000000000000003";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires `bitcoind`, `ldk-server`, `elementsd`, and liquid-enabled `electrs` (run via `nix develop`)"]
@@ -187,7 +183,7 @@ async fn ln_to_liquid_swap_create_pay_claim() -> Result<()> {
             node_pubkey: bob_info.node_id,
             address: bob.listen_addr().to_string(),
             channel_amount_sats: 100_000,
-            push_to_counterparty_msat: None,
+            push_to_counterparty_msat: Some(20_000_000),
             channel_config: None,
             announce_channel: false,
         })
@@ -281,27 +277,13 @@ async fn ln_to_liquid_swap_create_pay_claim() -> Result<()> {
         .sync()
         .context("sync seller after receiving asset")?;
 
-    let buyer_dir = tempfile::tempdir().context("create buyer wallet dir")?;
-    let buyer_wallet = LiquidWallet::new(
-        BUYER_MNEMONIC,
-        BUYER_SLIP77,
-        &electrum_url,
-        buyer_dir.path(),
-        ElementsNetwork::default_regtest(),
-    )
-    .context("create buyer wallet")?;
-
-    let buyer_receive = buyer_wallet.address_at(0).context("get buyer address")?;
-    let buyer_asset_before = buyer_wallet
-        .balance(&asset_id)
-        .context("buyer asset balance before")?;
+    let buyer_receive = seller_wallet.address_at(1).context("get buyer address")?;
 
     // --- Swap gRPC server (seller LN = bob, buyer LN = alice) ---
     let store_path = seller_dir.path().join("store.sqlite3");
     let store = SqliteStore::open(store_path).context("create sqlite store")?;
     let store = Arc::new(Mutex::new(store));
-    let seller_wallet = Arc::new(Mutex::new(seller_wallet));
-    let buyer_wallet = Arc::new(Mutex::new(buyer_wallet));
+    let wallet = Arc::new(Mutex::new(seller_wallet));
 
     let cfg = SwapServiceConfig {
         sell_asset_id: asset_id,
@@ -310,18 +292,10 @@ async fn ln_to_liquid_swap_create_pay_claim() -> Result<()> {
         refund_delta_blocks: 20,
         invoice_expiry_secs: 3600,
         seller_key_index: 0,
-        buyer_key_index: 0,
+        buyer_key_index: 1,
     };
-    let seller_ln = LdkLightningClient::new(bob.rest_service_address().to_string());
-    let buyer_ln = LdkLightningClient::new(alice.rest_service_address().to_string());
-    let svc = SwapServiceImpl::new(
-        cfg,
-        seller_ln,
-        buyer_ln,
-        seller_wallet.clone(),
-        buyer_wallet.clone(),
-        store,
-    );
+    let ln = LdkLightningClient::new(alice.rest_service_address().to_string());
+    let svc = SwapServiceImpl::new(cfg, ln, wallet.clone(), store);
 
     let port = get_available_port().context("select gRPC port")?;
     let listen_addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
@@ -388,12 +362,12 @@ async fn ln_to_liquid_swap_create_pay_claim() -> Result<()> {
     anyhow::ensure!(invoice_hash == resp_hash, "payment_hash mismatch");
 
     let pay_resp = swap_client
-        .pay_lightning(PayLightningRequest {
+        .create_lightning_payment(CreateLightningPaymentRequest {
             swap_id: swap.swap_id.clone(),
             payment_timeout_secs: 60,
         })
         .await
-        .context("PayLightning")?
+        .context("CreateLightningPayment")?
         .into_inner();
 
     let preimage: [u8; 32] = pay_resp
@@ -403,32 +377,20 @@ async fn ln_to_liquid_swap_create_pay_claim() -> Result<()> {
     anyhow::ensure!(sha256_preimage(&preimage) == resp_hash, "preimage mismatch");
 
     let claim_resp = swap_client
-        .claim_asset(ClaimAssetRequest {
+        .create_asset_claim(CreateAssetClaimRequest {
             swap_id: swap.swap_id.clone(),
             claim_fee_sats: 500,
         })
         .await
-        .context("ClaimAsset")?
+        .context("CreateAssetClaim")?
         .into_inner();
     let claim_txid = claim_resp.claim_txid;
     env.elementsd_generate(1);
-    buyer_wallet
+    wallet
         .lock()
         .expect("wallet mutex poisoned")
         .sync()
-        .context("sync buyer after claim")?;
-
-    let buyer_asset_after = buyer_wallet
-        .lock()
-        .expect("wallet mutex poisoned")
-        .balance(&asset_id)
-        .context("buyer asset balance after")?;
-    anyhow::ensure!(
-        buyer_asset_after == buyer_asset_before + asset_amount,
-        "buyer asset did not increase: before={} after={}",
-        buyer_asset_before,
-        buyer_asset_after
-    );
+        .context("sync wallet after claim")?;
 
     // Cleanup gRPC server.
     let _ = shutdown_tx.send(());

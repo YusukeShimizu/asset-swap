@@ -2,8 +2,8 @@ use anyhow::{Context as _, Result};
 use clap::{Parser as _, Subcommand};
 use ln_liquid_swap::proto::v1::swap_service_client::SwapServiceClient;
 use ln_liquid_swap::proto::v1::{
-    ClaimAssetRequest, CreateQuoteRequest, CreateSwapRequest, GetQuoteRequest, GetSwapRequest,
-    PayLightningRequest, SwapStatus,
+    CreateAssetClaimRequest, CreateLightningPaymentRequest, CreateQuoteRequest, CreateSwapRequest,
+    GetQuoteRequest, GetSwapRequest, SwapStatus,
 };
 use serde_json::json;
 
@@ -40,14 +40,14 @@ enum Command {
         #[arg(long)]
         swap_id: String,
     },
-    PayLightning {
+    CreateLightningPayment {
         #[arg(long)]
         swap_id: String,
 
         #[arg(long, default_value_t = 60)]
         payment_timeout_secs: u32,
     },
-    ClaimAsset {
+    CreateAssetClaim {
         #[arg(long)]
         swap_id: String,
 
@@ -142,17 +142,17 @@ async fn main() -> Result<()> {
 
             swap_json(swap)
         }
-        Command::PayLightning {
+        Command::CreateLightningPayment {
             swap_id,
             payment_timeout_secs,
         } => {
             let resp = client
-                .pay_lightning(PayLightningRequest {
+                .create_lightning_payment(CreateLightningPaymentRequest {
                     swap_id,
                     payment_timeout_secs,
                 })
                 .await
-                .context("PayLightning")?
+                .context("CreateLightningPayment")?
                 .into_inner();
 
             json!({
@@ -160,17 +160,17 @@ async fn main() -> Result<()> {
               "preimage_hex": hex::encode(resp.preimage),
             })
         }
-        Command::ClaimAsset {
+        Command::CreateAssetClaim {
             swap_id,
             claim_fee_sats,
         } => {
             let resp = client
-                .claim_asset(ClaimAssetRequest {
+                .create_asset_claim(CreateAssetClaimRequest {
                     swap_id,
                     claim_fee_sats,
                 })
                 .await
-                .context("ClaimAsset")?
+                .context("CreateAssetClaim")?
                 .into_inner();
 
             json!({

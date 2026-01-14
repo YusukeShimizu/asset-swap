@@ -2,168 +2,182 @@
 
 ## Goal
 
-- LDK Server（`ldk-server` デーモン）をテスト内で実際に起動する。regtest 上で「チャネル作成 → 請求書（BOLT11） → 支払い（送金）」までを自動で通す Integration Test を追加する。
-- 失敗時に原因調査ができるように、外部プロセスのログとテストの観測点を明確にする。
+- Start LDK Server (`ldk-server` daemon) as real processes inside the test. On regtest, add an
+  integration test that automatically completes "open channel → BOLT11 invoice → payment"
+  end-to-end.
+- Make external process logs and test observation points explicit so failures can be diagnosed.
 
-### 非目的
+### Non-goals
 
-- mainnet/testnet を対象にしない。
-- LSPS/JIT などの高度なフローを対象にしない（まずは通常のチャネル + BOLT11 を通す）。
-- ルーティング（複数ホップ）を対象にしない（まずは 1 hop で通す）。
+- Do not target mainnet/testnet.
+- Do not cover advanced flows like LSPS/JIT. Start with a normal channel + BOLT11.
+- Do not cover multi-hop routing. Start with a single hop.
 
 ## Scope
 
-### 変更対象
+### In scope
 
-- `tests/` に E2E シナリオを追加する。
-- `Cargo.toml` の `dev-dependencies` に、テスト用の最小限の依存を追加する。
-- `flake.nix` に `bitcoind` と `ldk-server` 実行環境（バイナリ）を提供するための定義を追加する。
-- （必要なら）`justfile` に E2E テスト実行用のレシピを追加する。
-- （必要なら）`spec.md` に新しい代表操作（E2E）の concept/action を追加する。
+- Add an E2E scenario under `tests/`.
+- Add the minimum test dependencies under `dev-dependencies` in `Cargo.toml`.
+- Add definitions to `flake.nix` to provide `bitcoind` and `ldk-server` binaries in the dev shell.
+- If needed, add recipes to `justfile` to run the E2E tests.
+- If needed, add new representative E2E concept/actions to `spec.md`.
 
-### 変更しない
+### Out of scope
 
-- 本体のプロダクションコード（`src/`）に Lightning 実装を追加しない（テストハーネス中心）。
-- Docker 前提の手順は追加しない（Nix Flakes の再現性を優先する）。
+- Do not add Lightning implementation to production code under `src/` (focus on the test harness).
+- Do not add Docker-based instructions (prefer Nix Flakes reproducibility).
 
 ## Milestones
 
-### M1: 実行環境（Nix）を確立する
+### M1: Establish the runtime environment (Nix)
 
-#### 観測可能な成果
+#### Observable outcomes
 
-- `nix develop -c bitcoind --version` が成功する。
-- `nix develop -c ldk-server --help`（または同等）が成功する。
+- `nix develop -c bitcoind --version` succeeds.
+- `nix develop -c ldk-server --help` (or equivalent) succeeds.
 
-#### 作業内容
+#### Work
 
-- `flake.nix` に Bitcoin Core（`bitcoind`）を追加する。
-- `flake.nix` に LDK Server（`ldk-server`）バイナリを追加する。
-  - 推奨: `pkgs.rustPlatform.buildRustPackage` で upstream の `lightningdevkit/ldk-server` を `rev` 固定でビルドする。
-  - 代替: `cargo install --git ... --rev ...` を `just` で管理する（ただし再現性は Nix ビルドより落ちる）。
-- CI での実行時間が重い場合に備え、E2E テストを `#[ignore]` で段階導入できるように設計する（M4 で決める）。
+- Add Bitcoin Core (`bitcoind`) to `flake.nix`.
+- Add LDK Server (`ldk-server`) to `flake.nix`.
+  - Preferred: build upstream `lightningdevkit/ldk-server` pinned to a `rev` via
+    `pkgs.rustPlatform.buildRustPackage`.
+  - Alternative: manage `cargo install --git ... --rev ...` via `just` (less reproducible than a
+    Nix build).
+- If CI runtime is too heavy, design the test so it can be introduced gradually via `#[ignore]`
+  (decide in M4).
 
-### M2: bitcoind（regtest）をテストから起動できるようにする
+### M2: Start bitcoind (regtest) from tests
 
-#### 観測可能な成果
+#### Observable outcomes
 
-- Integration Test から `bitcoind` を起動し、RPC が疎通できる。
-- `generatetoaddress` でブロックを生成し、`getblockcount` が増える。
+- Start `bitcoind` from an integration test and communicate with its RPC.
+- Generate blocks with `generatetoaddress` and observe `getblockcount` increasing.
 
-#### 作業内容（テストサポート）
+#### Work (test support)
 
-- `tests/support/`（または `tests/support.rs`）に `BitcoindProcess` を実装する。
-  - `tempfile` で `datadir` を作る。
-  - `bitcoin.conf` を生成する。最低限の設定を入れる。
-    - `regtest=1`。
-    - `server=1`。
-    - `rpcuser` と `rpcpassword`。
-    - `rpcport` と `port`。
-    - `fallbackfee`。
-  - `std::process::Command` で起動し、`bitcoincore_rpc` で readiness をポーリングする。
-  - Drop で `kill` し、必要なら `wait` する。
-- `bitcoincore-rpc` を `dev-dependencies` に追加する。
+- Implement `BitcoindProcess` under `tests/support/` (or `tests/support.rs`).
+  - Create a `datadir` with `tempfile`.
+  - Generate `bitcoin.conf` with the minimal required settings:
+    - `regtest=1`
+    - `server=1`
+    - `rpcuser` and `rpcpassword`
+    - `rpcport` and `port`
+    - `fallbackfee`
+  - Start via `std::process::Command` and poll readiness via `bitcoincore_rpc`.
+  - Kill on `Drop`, and `wait` if needed.
+- Add `bitcoincore-rpc` to `dev-dependencies`.
 
-#### 設計メモ
+#### Design notes
 
-- コイン生成は「新規ウォレット作成 → 101 ブロック採掘 → 成熟後に送金」を基本形にする。
-- ポート衝突のリスクがあるため、ランダムポートを選び、起動失敗時はリトライする。
+- Use a basic coin generation pattern: create wallet → mine 101 blocks → after maturity, send
+  funds.
+- Port collisions are possible. Choose random ports and retry on startup failure.
 
-### M3: ldk-server（Alice/Bob）をテストから起動できるようにする
+### M3: Start ldk-server (Alice/Bob) from tests
 
-#### 観測可能な成果
+#### Observable outcomes
 
-- 2 つの `ldk-server` インスタンスを別ポートで起動できる。
-- 両方に対して `GetNodeInfo` が成功し、`node_id` を取得できる。
+- Start two `ldk-server` instances on separate ports.
+- `GetNodeInfo` succeeds for both and `node_id` can be obtained.
 
-#### 作業内容（テストサポート）
+#### Work (test support)
 
-- `tests/support/` に `LdkServerProcess` を実装する。
-  - 各ノードごとに `storage.disk.dir_path` とログファイルを分ける。
-  - `node.listening_address` と `node.rest_service_address` は衝突しないポートを割り当てる。
-  - `bitcoind` RPC 設定は M2 の `BitcoindProcess` と一致させる。
-  - readiness は `ldk-server-client`（または `reqwest` + `prost`）で `GetNodeInfo` を繰り返し叩いて判定する。
-- Rust 側の API クライアントは、可能なら upstream の `ldk-server-client` を `dev-dependency`（git + `rev` 固定）で取り込む。
-  - 代替: `ldk-server-protos` を取り込み、`reqwest` で `application/octet-stream` の Protobuf POST を直接実装する。
+- Implement `LdkServerProcess` under `tests/support/`.
+  - Separate `storage.disk.dir_path` and log files per node.
+  - Allocate non-conflicting ports for `node.listening_address` and `node.rest_service_address`.
+  - Align bitcoind RPC config with the `BitcoindProcess` from M2.
+  - For readiness, repeatedly call `GetNodeInfo` via `ldk-server-client` (or `reqwest` + `prost`)
+    until the node becomes ready.
+- For the Rust API client, prefer upstream `ldk-server-client` as a `dev-dependency`.
+  - Pin the git `rev`.
+  - Alternative: depend on `ldk-server-protos` and implement Protobuf-over-HTTP POST directly with
+    `reqwest` using `application/octet-stream`.
 
-### M4: E2E シナリオ（チャネル作成 → 請求書 → 支払い）を 1 本の Integration Test にする
+### M4: E2E scenario (open channel → invoice → payment) as a single integration test
 
-#### 観測可能な成果
+#### Observable outcomes
 
-- `cargo test --test ldk_server_regtest_e2e`（仮）が成功する。
-- テストが以下の観測点を満たす。
-  - チャネルが両ノードで `is_usable=true` になる。
-  - 支払いが送金側で `OUTBOUND + SUCCEEDED` として観測できる。
-  - 支払いが受領側で `INBOUND + SUCCEEDED` として観測できる。
+- `cargo test --test ldk_server_regtest_e2e` (tentative) succeeds.
+- The test observes all of the following:
+  - The channel becomes `is_usable=true` on both nodes.
+  - The payment is observed on the sender as `OUTBOUND + SUCCEEDED`.
+  - The payment is observed on the receiver as `INBOUND + SUCCEEDED`.
 
-#### シナリオ案（最小）
+#### Minimal scenario
 
-1. bitcoind regtest 起動（M2）。
-2. `ldk-server` を 2 台起動（Alice/Bob, M3）。
-3. Alice のオンチェーンアドレスを `OnchainReceive` で取得する。
-4. bitcoind から Alice に送金し、1 ブロック採掘して入金を確定する。
-5. Bob の `node_id` と `listening_address` を使い、Alice から `OpenChannel` を実行する。
-6. `ListChannels` をポーリングしつつ必要数のブロックを採掘し、両者で `is_usable=true` を待つ。
-7. Bob が `Bolt11Receive` で請求書を発行する。
-8. Alice が `Bolt11Send` で支払う。
-9. `ListPayments` をポーリングして SUCCEEDED を両者で確認する。
+1. Start bitcoind regtest (M2).
+2. Start two `ldk-server` instances (Alice/Bob, M3).
+3. Get Alice's onchain address via `OnchainReceive`.
+4. Send funds from bitcoind to Alice and mine 1 block to confirm.
+5. Use Bob's `node_id` and `listening_address` to call `OpenChannel` from Alice to Bob.
+6. Poll `ListChannels` while mining confirmations until both sides show `is_usable=true`.
+7. Bob creates an invoice via `Bolt11Receive`.
+8. Alice pays via `Bolt11Send`.
+9. Poll `ListPayments` until `SUCCEEDED` is observed on both nodes.
 
-#### 安定化ポイント
+#### Stabilization points
 
-- 全ての待機は「期限付きポーリング（例: 60–120 秒）+ 失敗時のログ出力」を標準にする。
-- regtest のブロック生成はテストが責任を持つ（外部状態に依存しない）。
+- All waits should be deadline-based polling (for example: 60–120 seconds) and print log paths on
+  failure.
+- The test must own regtest mining (do not rely on external chain state).
 
-### M5: 実行導線（CI/ローカル）を整える
+### M5: Make the execution path ergonomic (CI/local)
 
-#### 観測可能な成果
+#### Observable outcomes
 
-- `nix develop -c cargo test --test ldk_server_regtest_e2e -- --nocapture` が再現可能に動く。
-- 失敗時に `bitcoind` / `ldk-server` のログを参照できる。
+- `nix develop -c cargo test --test ldk_server_regtest_e2e -- --nocapture` runs reproducibly.
+- On failure, you can inspect `bitcoind` / `ldk-server` logs.
 
-#### 作業内容
+#### Work
 
-- 実行時間が許容できる場合は `just ci` に含める。
-- 重い場合は次のどちらかを選ぶ:
-  - `#[ignore]` で `just e2e`（新設）に分離する。
-  - 環境変数（例: `RUN_LDK_E2E=1`）がある時だけ実行する。
+- If runtime is acceptable, include it in `just ci`.
+- If heavy, choose one:
+  - Keep the test as `#[ignore]` and run via `just e2e` (new recipe).
+  - Run only when an env var (for example: `RUN_LDK_E2E=1`) is set.
 
 ## Tests
 
-### 追加する Integration Test（案）
+### Integration test to add (proposal)
 
 - `tests/ldk_server_regtest_e2e.rs`
-  - 単一責任: 「ldk-server を 2 台起動し、チャネル作成 → 請求書 → 支払い」を通す。
-  - 依存: `BitcoindProcess`, `LdkServerProcess`, `wait_for` ユーティリティ。
+  - Single responsibility: start two ldk-server nodes and complete open channel → invoice →
+    payment.
+  - Dependencies: `BitcoindProcess`, `LdkServerProcess`, `wait_for` utility.
 
-### 実装するサポート（案）
+### Support code to implement (proposal)
 
-- `tests/support/bitcoind.rs`: bitcoind 起動と RPC 操作（採掘・送金）。
-- `tests/support/ldk_server.rs`: ldk-server 起動と API クライアント。
-- `tests/support/wait.rs`: 期限付きポーリング（指数バックオフ + 観測ログ）。
+- `tests/support/bitcoind.rs`: start bitcoind and provide RPC operations (mining, sending).
+- `tests/support/ldk_server.rs`: start ldk-server and provide an API client.
+- `tests/support/wait.rs`: deadline-based polling (exponential backoff + observation logs).
 
 ## Decisions / Risks
 
-### 重要な判断
+### Key decisions
 
-- API 操作は `ldk-server-client` を優先する。
-  - 理由: Protobuf の HTTP POST とエラーデコードを既に実装しているため、テスト側の責務を減らせる。
-- ノードは 2 台（Alice/Bob）の `ldk-server` だけで完結させる。
-  - 理由: 「チャネル作成 → 支払い」を最短で閉じるには、外部 LN 実装（LND/CLN）を入れない方が安定する。
+- Prefer `ldk-server-client` for API operations.
+  - Rationale: it already implements Protobuf-over-HTTP POST and error decoding, reducing test-side
+    complexity.
+- Use only two ldk-server nodes (Alice/Bob).
+  - Rationale: to close "open channel → payment" with minimum moving parts, avoid introducing other
+    LN implementations (LND/CLN).
 
-### 既知のリスクと緩和策
+### Known risks and mitigations
 
-- リスク: 同期・チャネル確定待ちが不安定でフレークする。
-  - 緩和: `GetNodeInfo.current_best_block` と `ListChannels.is_usable` を観測し、期限付きで待つ。
-- リスク: ポート衝突で起動に失敗する。
-  - 緩和: ランダムポート + 起動失敗リトライ。
-- リスク: bitcoind の fee 推定が失敗して送金・チャネル作成が止まる。
-  - 緩和: `fallbackfee` を設定する。
-- リスク: upstream の `ldk-server` API が breaking change する。
-  - 緩和: Nix と Cargo の双方で `rev` 固定する。
+- Risk: sync/channel confirmation waits are flaky.
+  - Mitigation: observe `GetNodeInfo.current_best_block` and `ListChannels.is_usable` with
+    deadlines.
+- Risk: port collisions cause startup failures.
+  - Mitigation: random ports + retry.
+- Risk: bitcoind fee estimation fails and blocks sends/channel opens.
+  - Mitigation: set `fallbackfee`.
+- Risk: upstream `ldk-server` API introduces breaking changes.
+  - Mitigation: pin `rev` in both Nix and Cargo.
 
 ## Progress
 
-- 2026-01-12: ExecPlan を作成した。
-- 2026-01-12: `flake.nix` に `bitcoin` と `ldk-server` を追加した。
-- 2026-01-12: `tests/ldk_server_regtest_e2e.rs` と `tests/support/` を実装した。
-- 2026-01-12: `just e2e` と `just e2e_keep` を追加した。
+- 2026-01-12: Created this ExecPlan.
+- 2026-01-12: Added `bitcoin` and `ldk-server` to `flake.nix`.
+- 2026-01-12: Implemented `tests/ldk_server_regtest_e2e.rs` and `tests/support/`.
+- 2026-01-12: Added `just e2e` and `just e2e_keep`.

@@ -59,23 +59,23 @@ service SwapService {
   // - `NOT_FOUND` if the swap does not exist.
   rpc GetSwap(GetSwapRequest) returns (Swap);
 
-  // Pays the Lightning invoice for a swap and returns the payment result.
+  // Creates a Lightning payment for a swap invoice and returns the payment result.
   //
   // Errors:
   // - `INVALID_ARGUMENT` if the request is malformed or fails validation.
   // - `NOT_FOUND` if the swap does not exist.
   // - `FAILED_PRECONDITION` if the swap is not funded.
   // - `INTERNAL` for unexpected LN backend failures.
-  rpc PayLightning(PayLightningRequest) returns (PayLightningResponse);
+  rpc CreateLightningPayment(CreateLightningPaymentRequest) returns (LightningPayment);
 
-  // Claims the Liquid HTLC for a swap (asset acquisition).
+  // Creates an asset claim for a swap (Liquid HTLC spend).
   //
   // Errors:
   // - `INVALID_ARGUMENT` if the request is malformed or fails validation.
   // - `NOT_FOUND` if the swap does not exist.
   // - `FAILED_PRECONDITION` if the swap has not been paid yet (missing preimage).
   // - `INTERNAL` for unexpected wallet / backend failures.
-  rpc ClaimAsset(ClaimAssetRequest) returns (ClaimAssetResponse);
+  rpc CreateAssetClaim(CreateAssetClaimRequest) returns (AssetClaim);
 }
 
 message CreateQuoteRequest {
@@ -200,7 +200,7 @@ message GetSwapRequest {
   ];
 }
 
-message PayLightningRequest {
+message CreateLightningPaymentRequest {
   // The swap id returned by `CreateSwap`.
   string swap_id = 1 [
     (google.api.field_behavior) = REQUIRED,
@@ -216,7 +216,7 @@ message PayLightningRequest {
   uint32 payment_timeout_secs = 2 [(buf.validate.field).uint32.lte = 600];
 }
 
-message PayLightningResponse {
+message LightningPayment {
   // The payment id returned by the LN backend.
   string payment_id = 1;
 
@@ -224,7 +224,7 @@ message PayLightningResponse {
   bytes preimage = 2;
 }
 
-message ClaimAssetRequest {
+message CreateAssetClaimRequest {
   // The swap id returned by `CreateSwap`.
   string swap_id = 1 [
     (google.api.field_behavior) = REQUIRED,
@@ -240,7 +240,7 @@ message ClaimAssetRequest {
   uint64 claim_fee_sats = 2;
 }
 
-message ClaimAssetResponse {
+message AssetClaim {
   // The txid of the claim transaction (hex-encoded).
   string claim_txid = 1;
 }

@@ -39,28 +39,22 @@ pub struct SwapServiceConfig {
 #[derive(Clone)]
 pub struct SwapServiceImpl {
     cfg: SwapServiceConfig,
-    seller_ln: LdkLightningClient,
-    buyer_ln: LdkLightningClient,
-    seller_wallet: Arc<Mutex<LiquidWallet>>,
-    buyer_wallet: Arc<Mutex<LiquidWallet>>,
+    ln: LdkLightningClient,
+    wallet: Arc<Mutex<LiquidWallet>>,
     store: Arc<Mutex<SqliteStore>>,
 }
 
 impl SwapServiceImpl {
     pub fn new(
         cfg: SwapServiceConfig,
-        seller_ln: LdkLightningClient,
-        buyer_ln: LdkLightningClient,
-        seller_wallet: Arc<Mutex<LiquidWallet>>,
-        buyer_wallet: Arc<Mutex<LiquidWallet>>,
+        ln: LdkLightningClient,
+        wallet: Arc<Mutex<LiquidWallet>>,
         store: Arc<Mutex<SqliteStore>>,
     ) -> Self {
         Self {
             cfg,
-            seller_ln,
-            buyer_ln,
-            seller_wallet,
-            buyer_wallet,
+            ln,
+            wallet,
             store,
         }
     }
@@ -200,7 +194,7 @@ impl pb::swap_service_server::SwapService for SwapServiceImpl {
         }
 
         let buyer_claim_address = self
-            .buyer_wallet
+            .wallet
             .lock()
             .expect("wallet mutex poisoned")
             .address_at(self.cfg.buyer_key_index)
@@ -320,7 +314,7 @@ impl pb::swap_service_server::SwapService for SwapServiceImpl {
             })?;
 
         let params = self
-            .seller_wallet
+            .wallet
             .lock()
             .expect("wallet mutex poisoned")
             .network()
@@ -333,7 +327,7 @@ impl pb::swap_service_server::SwapService for SwapServiceImpl {
 
         let swap_id = Uuid::new_v4().to_string();
         let invoice = self
-            .seller_ln
+            .ln
             .create_invoice(
                 quote.total_price_msat,
                 format!("swap:{swap_id}"),
@@ -346,14 +340,14 @@ impl pb::swap_service_server::SwapService for SwapServiceImpl {
             .map_err(|e| Status::internal(format!("parse invoice: {e:#}")))?;
         let payment_hash_hex = hex::encode(payment_hash);
 
-        let seller_wallet = self.seller_wallet.clone();
+        let wallet = self.wallet.clone();
         let store = self.store.clone();
         let cfg = self.cfg.clone();
         let quote_id = quote.quote_id.clone();
 
         let record = tokio::task::spawn_blocking(move || -> Result<SwapRecord> {
             let (mut record, htlc_script_pubkey, funding_txid) = {
-                let mut wallet = seller_wallet.lock().expect("wallet mutex poisoned");
+                let mut wallet = wallet.lock().expect("wallet mutex poisoned");
                 wallet.sync().context("sync wallet")?;
 
                 let refund_lock_height =
@@ -418,7 +412,7 @@ impl pb::swap_service_server::SwapService for SwapServiceImpl {
             }?;
 
             let _confs = Self::wait_for_funding_confirmations(
-                &seller_wallet,
+                &wallet,
                 &htlc_script_pubkey,
                 &funding_txid,
                 min_funding_confs,
@@ -466,10 +460,10 @@ impl pb::swap_service_server::SwapService for SwapServiceImpl {
         Ok(Response::new(swap))
     }
 
-    async fn pay_lightning(
+    async fn create_lightning_payment(
         &self,
-        request: Request<pb::PayLightningRequest>,
-    ) -> Result<Response<pb::PayLightningResponse>, Status> {
+        request: Request<pb::CreateLightningPaymentRequest>,
+    ) -> Result<Response<pb::LightningPayment>, Status> {
         let req = request.into_inner();
         if req.swap_id.trim().is_empty() {
             return Err(Status::invalid_argument("swap_id is required"));
@@ -488,7 +482,7 @@ impl pb::swap_service_server::SwapService for SwapServiceImpl {
         {
             let preimage = hex::decode(preimage_hex)
                 .map_err(|e| Status::internal(format!("decode preimage_hex: {e:#}")))?;
-            return Ok(Response::new(pb::PayLightningResponse {
+            return Ok(Response::new(pb::LightningPayment {
                 payment_id,
                 preimage,
             }));
@@ -499,7 +493,7 @@ impl pb::swap_service_server::SwapService for SwapServiceImpl {
         }
 
         let payment_id = self
-            .buyer_ln
+            .ln
             .pay_invoice(record.bolt11_invoice.clone())
             .await
             .map_err(|e| Status::internal(format!("pay invoice: {e:#}")))?;
@@ -510,7 +504,7 @@ impl pb::swap_service_server::SwapService for SwapServiceImpl {
             u64::from(req.payment_timeout_secs)
         };
         let preimage = self
-            .buyer_ln
+            .ln
             .wait_preimage(&payment_id, Duration::from_secs(timeout_secs))
             .await
             .map_err(|e| Status::internal(format!("wait preimage: {e:#}")))?;
@@ -537,17 +531,17 @@ impl pb::swap_service_server::SwapService for SwapServiceImpl {
             )
             .map_err(|e| Status::internal(format!("persist payment: {e:#}")))?;
 
-        Ok(Response::new(pb::PayLightningResponse {
+        Ok(Response::new(pb::LightningPayment {
             payment_id,
             preimage: hex::decode(preimage_hex)
                 .expect("hex encoding/decoding of preimage must roundtrip"),
         }))
     }
 
-    async fn claim_asset(
+    async fn create_asset_claim(
         &self,
-        request: Request<pb::ClaimAssetRequest>,
-    ) -> Result<Response<pb::ClaimAssetResponse>, Status> {
+        request: Request<pb::CreateAssetClaimRequest>,
+    ) -> Result<Response<pb::AssetClaim>, Status> {
         let req = request.into_inner();
         if req.swap_id.trim().is_empty() {
             return Err(Status::invalid_argument("swap_id is required"));
@@ -562,7 +556,7 @@ impl pb::swap_service_server::SwapService for SwapServiceImpl {
             .ok_or_else(|| Status::not_found("swap not found"))?;
 
         if let Some(claim_txid) = record.claim_txid.clone() {
-            return Ok(Response::new(pb::ClaimAssetResponse { claim_txid }));
+            return Ok(Response::new(pb::AssetClaim { claim_txid }));
         }
 
         let preimage_hex = record
@@ -580,16 +574,16 @@ impl pb::swap_service_server::SwapService for SwapServiceImpl {
             req.claim_fee_sats
         };
 
-        let buyer_wallet = self.buyer_wallet.clone();
+        let wallet = self.wallet.clone();
         let store = self.store.clone();
         let cfg = self.cfg.clone();
         let record_swap_id = record.swap_id.clone();
 
         let claim_txid = tokio::task::spawn_blocking(move || -> Result<String> {
-            let mut buyer_wallet = buyer_wallet.lock().expect("wallet mutex poisoned");
-            buyer_wallet.sync().context("sync buyer wallet")?;
+            let mut wallet = wallet.lock().expect("wallet mutex poisoned");
+            wallet.sync().context("sync liquid wallet")?;
 
-            let buyer_receive = buyer_wallet
+            let buyer_receive = wallet
                 .address_at(cfg.buyer_key_index)
                 .context("get buyer receive address")?;
             anyhow::ensure!(
@@ -597,7 +591,7 @@ impl pb::swap_service_server::SwapService for SwapServiceImpl {
                 "buyer_claim_address mismatch"
             );
 
-            let buyer_secret_key = derive_secret_key(buyer_wallet.signer(), cfg.buyer_key_index)
+            let buyer_secret_key = derive_secret_key(wallet.signer(), cfg.buyer_key_index)
                 .context("derive buyer secret key")?;
 
             let witness_script: Script = record
@@ -608,14 +602,13 @@ impl pb::swap_service_server::SwapService for SwapServiceImpl {
             let funding_txid =
                 Txid::from_str(&record.funding_txid).context("parse funding_txid")?;
             let asset_id = AssetId::from_str(&record.asset_id).context("parse asset_id")?;
-            let policy_asset = buyer_wallet.policy_asset();
             let funding = HtlcFunding {
                 funding_txid,
                 asset_vout: record.asset_vout,
                 lbtc_vout: record.lbtc_vout,
                 asset_id,
                 asset_amount: record.asset_amount,
-                policy_asset,
+                policy_asset: wallet.policy_asset(),
                 fee_subsidy_sats: record.fee_subsidy_sats,
             };
 
@@ -629,7 +622,7 @@ impl pb::swap_service_server::SwapService for SwapServiceImpl {
             )
             .context("build claim tx")?;
 
-            let txid = buyer_wallet
+            let txid = wallet
                 .broadcast_transaction(&tx)
                 .context("broadcast claim tx")?;
 
@@ -644,6 +637,6 @@ impl pb::swap_service_server::SwapService for SwapServiceImpl {
         .map_err(|e| Status::internal(format!("join: {e}")))?
         .map_err(|e| Status::internal(format!("claim asset: {e:#}")))?;
 
-        Ok(Response::new(pb::ClaimAssetResponse { claim_txid }))
+        Ok(Response::new(pb::AssetClaim { claim_txid }))
     }
 }

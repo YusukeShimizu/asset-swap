@@ -9,7 +9,7 @@ locked in a P2WSH HTLC (hashlock + CLTV).
 
 This page is the API-oriented overview.
 For a regtest runbook (including issuing an asset as RWA and selling it), see
-[RWA を発行して販売する（regtest）](/swap/rwa-issuance-and-sale).
+[Issue and sell an RWA (regtest)](/swap/rwa-issuance-and-sale).
 
 ## What This API Does
 
@@ -25,6 +25,8 @@ This is a minimal design and is not production-ready.
 - gRPC runs in **plaintext** and there is **no authentication/authorization**.
   - Do not expose the service to the public internet.
   - Protect it with network-level controls (private network / firewall) if used outside regtest.
+- This minimal server uses a single LN node for both invoice creation and payment.
+  - Depending on the LN backend, paying your own invoice may not be supported.
 - HTLC outputs are **explicit (unblinded)** for simplicity.
 - Current binaries are fixed to `ElementsNetwork::default_regtest()` (Liquid regtest).
   - Mainnet/testnet support is out of scope for this repo’s current state.
@@ -34,7 +36,7 @@ This is a minimal design and is not production-ready.
 - **Swap server**
   - Runs the gRPC server (`swap_server`).
   - Models both seller-side and buyer-side actions in a single Protobuf service.
-  - Holds seller inventory and buyer wallets in this minimal regtest-oriented setup.
+  - Uses a single LN node and a single Liquid wallet (seller/buyer keys are separated by key index) in this minimal regtest-oriented setup.
 - **CLI user**
   - Uses the CLI (`swap_cli`) or calls the gRPC API directly.
 
@@ -104,30 +106,30 @@ Error handling notes:
 - `FAILED_PRECONDITION` when the offer changed since quoting, or when the seller cannot fund (inventory/LBTC insufficient).
 - `INTERNAL` for unexpected wallet/backend failures.
 
-### `PayLightning`
+### `CreateLightningPayment`
 
 Pays the swap invoice on Lightning.
 
-The client sends a `PayLightningRequest`:
+The client sends a `CreateLightningPaymentRequest`:
 
 - `swap_id`: UUID string.
 - `payment_timeout_secs`: how long to wait for the preimage (0 uses a server default).
 
-The server returns a `PayLightningResponse` containing:
+The server returns a `LightningPayment` containing:
 
 - `payment_id`: LN backend payment id.
 - `preimage` (bytes): 32-byte preimage.
 
-### `ClaimAsset`
+### `CreateAssetClaim`
 
 Claims the Liquid HTLC (asset acquisition).
 
-The client sends a `ClaimAssetRequest`:
+The client sends a `CreateAssetClaimRequest`:
 
 - `swap_id`: UUID string.
 - `claim_fee_sats`: claim tx fee in sats (0 uses a server default).
 
-The server returns a `ClaimAssetResponse` containing:
+The server returns an `AssetClaim` containing:
 
 - `claim_txid`: Liquid txid (hex).
 
@@ -136,7 +138,7 @@ The server returns a `ClaimAssetResponse` containing:
 Fetches a swap by `swap_id`.
 The current implementation uses UUID strings for ids.
 
-Note: The server updates swap status to `PAID` / `CLAIMED` only when `PayLightning` / `ClaimAsset`
+Note: The server updates swap status to `PAID` / `CLAIMED` only when `CreateLightningPayment` / `CreateAssetClaim`
 are executed (there is no background watcher in this minimal design).
 
 ## Buyer Safety Checklist (Must Do)
@@ -196,7 +198,7 @@ grpcurl \
     "payment_timeout_secs": 60
   }' \
   127.0.0.1:50051 \
-  ln_liquid_swap.v1.SwapService/PayLightning
+  ln_liquid_swap.v1.SwapService/CreateLightningPayment
 
 grpcurl \
   -plaintext \
@@ -208,7 +210,7 @@ grpcurl \
     "claim_fee_sats": 500
   }' \
   127.0.0.1:50051 \
-  ln_liquid_swap.v1.SwapService/ClaimAsset
+  ln_liquid_swap.v1.SwapService/CreateAssetClaim
 ```
 
 Notes:
@@ -232,16 +234,12 @@ Server example:
 ```sh
 nix develop -c cargo run --bin swap_server -- \
   --listen-addr 127.0.0.1:50051 \
-  --seller-ldk-rest-addr http://127.0.0.1:3001 \
-  --buyer-ldk-rest-addr http://127.0.0.1:3002 \
+  --ldk-rest-addr http://127.0.0.1:3001 \
   --liquid-electrum-url tcp://127.0.0.1:50001 \
-  --seller-wallet-dir ./data/seller_wallet \
-  --buyer-wallet-dir ./data/buyer_wallet \
+  --wallet-dir ./data/wallet \
   --store-path ./data/store.sqlite3 \
-  --seller-mnemonic "$SELLER_MNEMONIC" \
-  --seller-slip77 "$SELLER_SLIP77" \
-  --buyer-mnemonic "$BUYER_MNEMONIC" \
-  --buyer-slip77 "$BUYER_SLIP77" \
+  --mnemonic "$MNEMONIC" \
+  --slip77 "$SLIP77" \
   --sell-asset-id "$ASSET_ID" \
   --price-msat-per-asset-unit 1000 \
   --fee-subsidy-sats 10000 \

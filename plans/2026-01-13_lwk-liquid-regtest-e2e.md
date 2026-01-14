@@ -2,141 +2,142 @@
 
 ## Goal
 
-- LWK を使い、Liquid regtest 上で Integration Test を追加する。
-- テストは「wallet 作成 → LBTC 受領と同期 → asset issuance → asset 送信 → 残高検証」を通す。
-- 失敗時に原因調査ができるように、外部プロセスのログとテストの観測点を明確にする。
+- Add an integration test on Liquid regtest using LWK.
+- The test should cover: create wallet → receive/sync LBTC → issue asset → send asset → verify
+  balances.
+- Make external process logs and test observation points explicit so failures can be diagnosed.
 
-### 非目的
+### Non-goals
 
-- mainnet/testnet を対象にしない。
-- pegin を前提にしない。
-- asset registry 連携は対象にしない。
+- Do not target mainnet/testnet.
+- Do not require pegin.
+- Do not integrate with an asset registry.
 
 ## Scope
 
-### 変更対象
+### In scope
 
-- `tests/` に Liquid regtest の E2E シナリオを追加する。
-- `Cargo.toml` の `dev-dependencies` に LWK 関連 crate を追加する。
-- `flake.nix` に `elementsd` と Liquid 対応 `electrs` を提供する定義を追加する。
-- `justfile` に E2E テスト実行用のレシピを追加する。
+- Add a Liquid regtest E2E scenario under `tests/`.
+- Add LWK-related crates under `dev-dependencies` in `Cargo.toml`.
+- Add definitions to `flake.nix` to provide `elementsd` and liquid-enabled `electrs`.
+- Add `justfile` recipes to run the E2E tests.
 
-### 変更しない
+### Out of scope
 
-- `src/` のプロダクションコードに Liquid 機能を追加しない。
-- `just ci` に E2E テストを追加しない。
+- Do not add Liquid features to production code under `src/`.
+- Do not add these E2E tests to `just ci`.
 
 ## Milestones
 
-### M1: 実行環境（Nix）を確立する
+### M1: Establish the runtime environment (Nix)
 
-#### 観測可能な成果
+#### Observable outcomes
 
-- `nix develop -c elementsd --version` が成功する。
-- `nix develop -c electrs --help` が成功する。
+- `nix develop -c elementsd --version` succeeds.
+- `nix develop -c electrs --help` succeeds.
 
-#### 作業内容
+#### Work
 
-- `flake.nix` に `elementsd` を追加する。
-- `flake.nix` に Liquid 対応 `electrs` を追加する。
-  - LWK の `electrs-flake` の `blockstream-electrs-liquid` を使う案を優先する。
-  - 代替として `electrs` の Liquid 対応ビルドを `rev` 固定でビルドする。
-- LWK の `lwk_test_util::TestEnvBuilder` を使う場合は、次の環境変数を dev shell で設定する。
-  - `ELEMENTSD_EXEC`。
-  - `ELECTRS_LIQUID_EXEC`。
+- Add `elementsd` to `flake.nix`.
+- Add liquid-enabled `electrs` to `flake.nix`.
+  - Prefer using LWK's `electrs-flake` `blockstream-electrs-liquid`.
+  - Alternatively, build a liquid-enabled `electrs` pinned to a `rev`.
+- If using `lwk_test_util::TestEnvBuilder`, set the following env vars in the dev shell:
+  - `ELEMENTSD_EXEC`
+  - `ELECTRS_LIQUID_EXEC`
 
-### M2: Wallet 作成と同期をテストに落とす
+### M2: Implement wallet creation and sync in tests
 
-#### 観測可能な成果
+#### Observable outcomes
 
-- Issuer wallet と Receiver wallet を生成できる。
-- `Sync` 後に tip height を観測できる。
+- Create an issuer wallet and a receiver wallet.
+- After `Sync`, observe the tip height.
 
-#### 作業内容
+#### Work
 
-- `tests/support/` に `LwkWalletFixture` を実装する。
-- `SwSigner` と Descriptor 生成を 1 箇所に集約する。
+- Implement `LwkWalletFixture` under `tests/support/`.
+- Centralize `SwSigner` and descriptor creation in one place.
 
-### M3: LBTC 受領と同期を通す
+### M3: Receive LBTC and sync
 
-#### 観測可能な成果
+#### Observable outcomes
 
-- Issuer wallet の policy asset 残高が増える。
+- The issuer wallet balance for the policy asset increases.
 
-#### 作業内容
+#### Work
 
-- `tests/support/` に `LiquidTestEnv` を実装する。
-  - `elementsd` と `electrs` を起動する。
-  - ブロック生成と送金を提供する。
-- LBTC は `elementsd` の初期コインを sweep して用意する。
+- Implement `LiquidRegtestEnv` under `tests/support/`.
+  - Start `elementsd` and `electrs`.
+  - Provide block generation and sends.
+- Prepare LBTC by sweeping the initial coins from `elementsd`.
 
-### M4: Asset issuance と送信を通す
+### M4: Exercise asset issuance and send
 
-#### 観測可能な成果
+#### Observable outcomes
 
-- `asset_id` と `reissuance_token_id` を取得できる。
-- Issuer 側で asset と token の残高が増える。
-- Receiver 側で asset の残高が増える。
+- Obtain `asset_id` and `reissuance_token_id`.
+- The issuer wallet balances for the asset and token increase.
+- The receiver wallet balance for the issued asset increases.
 
-#### 作業内容
+#### Work
 
-- Issuer wallet で issuance transaction を構築して署名し、ブロードキャストする。
-- Issuer wallet で issued asset を Receiver wallet の address に送る。
+- Build/sign/broadcast the issuance transaction from the issuer wallet.
+- Send the issued asset from the issuer wallet to the receiver wallet address.
 
-### M5: 残高検証を追加する
+### M5: Add balance assertions
 
-#### 観測可能な成果
+#### Observable outcomes
 
-- Issuer 側と Receiver 側の両方で残高を検証できる。
+- Verify balances on both issuer and receiver wallets.
 
-#### 作業内容
+#### Work
 
-- 検証対象は policy asset、issued asset、reissuance token に分ける。
-- 送金前後の差分で検証する。
+- Verify policy asset, issued asset, and reissuance token separately.
+- Verify via before/after deltas.
 
-### M6: 実行導線を整える
+### M6: Make the execution path ergonomic
 
-#### 観測可能な成果
+#### Observable outcomes
 
-- `nix develop -c just lwk_e2e` でテストを実行できる。
-- 失敗時にログを残して再実行できる。
+- Run tests via `nix develop -c just lwk_e2e`.
+- On failure, preserve logs and rerun.
 
-#### 作業内容
+#### Work
 
-- テストは `#[ignore]` とし、`just` の専用レシピで実行する。
-- `KEEP_LWK_E2E_ARTIFACTS=1` の時に作業ディレクトリを保持する。
+- Mark the test `#[ignore]` and run via a dedicated `just` recipe.
+- Keep the working directory when `KEEP_LWK_E2E_ARTIFACTS=1` is set.
 
 ## Tests
 
-### 追加する Integration Test（案）
+### Integration test to add (proposal)
 
 - `tests/lwk_liquid_regtest_e2e.rs`
-  - 単一責任: 「wallet 作成 → 受領と同期 → issuance → 送信 → 残高検証」を通す。
+  - Single responsibility: create wallet → receive/sync → issuance → send → balance verification.
 
-### テストの前提
+### Test prerequisites
 
-- `elementsd` と Liquid 対応 `electrs` が利用できる。
-- バックエンドは Electrum を使う。
+- `elementsd` and liquid-enabled `electrs` are available.
+- Use Electrum as the backend.
 
 ## Decisions / Risks
 
-### 重要な判断
+### Key decisions
 
-- pegin を避ける。
-  - 理由: セットアップが重くなる。
-- インデクサは `electrs` を使う。
-  - 理由: LWK の Electrum backend が成熟している。
+- Avoid pegin.
+  - Rationale: setup becomes heavy.
+- Use `electrs` as the indexer.
+  - Rationale: LWK's Electrum backend is mature.
 
-### 既知のリスクと緩和策
+### Known risks and mitigations
 
-- リスク: インデクサの同期待ちでフレークする。
-  - 緩和: tip height を期限付きでポーリングする。
-- リスク: confidential transaction のため、外部ツールで調査しにくい。
-  - 緩和: 送金額と残高差分をテスト内で出力する。
+- Risk: waiting for indexer sync is flaky.
+  - Mitigation: poll tip height with deadlines.
+- Risk: confidential transactions are harder to diagnose with external tools.
+  - Mitigation: print transfer amounts and balance deltas inside the test.
 
 ## Progress
 
-- 2026-01-13: ExecPlan を作成した。実装は未着手である。
-- 2026-01-13: `flake.nix` に `elementsd` と `electrs`（Liquid 対応）を追加した。
-- 2026-01-13: `tests/support/` に `LiquidRegtestEnv` と `LwkWalletFixture` を追加した。
-- 2026-01-13: `tests/lwk_liquid_regtest_e2e.rs` と `just lwk_e2e` を追加した。
+- 2026-01-13: Created this ExecPlan (implementation not started at that time).
+- 2026-01-13: Added `elementsd` and liquid-enabled `electrs` to `flake.nix`.
+- 2026-01-13: Added `LiquidRegtestEnv` and `LwkWalletFixture` under `tests/support/`.
+- 2026-01-13: Added `tests/lwk_liquid_regtest_e2e.rs` and `just lwk_e2e`.
