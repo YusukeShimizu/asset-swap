@@ -51,7 +51,8 @@ This is a minimal design and is not production-ready.
   - The server computes `total_price_msat = asset_amount * price_msat_per_asset_unit`.
 - The buyer creates a swap via `CreateSwap(quote_id)`.
   - The server rejects if the current offer differs from the quoted offer (`offer_id` mismatch).
-- The buyer MUST verify the invoice amount equals `Quote.total_price_msat` before paying.
+- The Lightning payer MUST verify the invoice amount equals `Quote.total_price_msat` before paying.
+  - For `LIQUID_TO_LN`, the buyer creates the invoice and the seller verifies it before paying.
 
 ## Prerequisites
 
@@ -111,6 +112,8 @@ The client sends a `CreateSwapRequest`:
   - For `LN_TO_LIQUID` (submarine swap), used as the claim key.
   - For `LIQUID_TO_LN` (reverse submarine swap), used as the refund key.
 - `buyer_bolt11_invoice`: buyer-created invoice to be paid by the seller (required for `LIQUID_TO_LN`).
+  - Must be empty for `LN_TO_LIQUID`.
+  - Must include an amount and must not be expired for `LIQUID_TO_LN`.
 
 The server returns a `Swap` containing:
 
@@ -126,6 +129,7 @@ The server returns a `Swap` containing:
 Error handling notes:
 
 - `INVALID_ARGUMENT` for malformed requests or validation failures.
+- `INVALID_ARGUMENT` if `buyer_bolt11_invoice` is amountless, expired, or mismatched with `Quote.total_price_msat`.
 - `NOT_FOUND` if the quote does not exist.
 - `FAILED_PRECONDITION` when the offer changed since quoting, or when the seller cannot fund (inventory/LBTC insufficient).
 - `INTERNAL` for unexpected wallet/backend failures.
@@ -220,6 +224,21 @@ grpcurl \
   127.0.0.1:50051 \
   ln_liquid_swap.v1.SwapService/CreateSwap
 
+# Reverse swap (LIQUID_TO_LN): buyer supplies a BOLT11 invoice.
+grpcurl \
+  -plaintext \
+  -H "authorization: Bearer $BUYER_TOKEN" \
+  -import-path proto \
+  -import-path proto_deps \
+  -proto proto/ln_liquid_swap/v1/swap.proto \
+  -d '{
+    "quote_id": "<QUOTE_ID>",
+    "buyer_liquid_address": "<BUYER_LIQUID_ADDRESS>",
+    "buyer_bolt11_invoice": "<BUYER_BOLT11_INVOICE>"
+  }' \
+  127.0.0.1:50051 \
+  ln_liquid_swap.v1.SwapService/CreateSwap
+
 grpcurl \
   -plaintext \
   -H "authorization: Bearer $BUYER_TOKEN" \
@@ -302,11 +321,20 @@ nix develop -c cargo run --bin swap_cli -- \
   create-swap \
   --quote-id "<QUOTE_ID>" \
   --buyer-liquid-address "$BUYER_LIQUID_ADDRESS"
+
+# Reverse swap: buyer supplies a BOLT11 invoice to be paid by the seller.
+nix develop -c cargo run --bin swap_cli -- \
+  --grpc-url http://127.0.0.1:50051 \
+  --auth-token "$BUYER_TOKEN" \
+  create-swap \
+  --quote-id "<QUOTE_ID>" \
+  --buyer-liquid-address "$BUYER_LIQUID_ADDRESS" \
+  --buyer-bolt11-invoice "$BUYER_BOLT11_INVOICE"
 ```
 
 ## Notes and Limitations
 
-- The current `swap_server` implementation supports `LN_TO_LIQUID` (submarine swap) only.
+- For `LIQUID_TO_LN`, the buyer must provide a non-expired invoice with a fixed amount.
 - This implementation uses explicit (unblinded) HTLC outputs for simplicity.
 - This design is not fully atomic and is intended for controlled environments (for example: regtest).
 - Refund handling is best-effort and depends on the `swap_server` process being up.

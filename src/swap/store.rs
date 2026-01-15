@@ -5,7 +5,7 @@ use std::time::Duration;
 use anyhow::{Context as _, Result};
 use rusqlite::{Connection, OptionalExtension as _, params};
 
-use super::{QuoteRecord, SwapRecord, SwapStatus};
+use super::{QuoteRecord, SwapDirection, SwapRecord, SwapStatus};
 
 #[derive(Debug)]
 pub struct SqliteStore {
@@ -45,9 +45,9 @@ impl SqliteStore {
 INSERT INTO quotes (
   quote_id,
   offer_id,
+  direction,
   asset_id,
   asset_amount,
-  buyer_claim_address,
   min_funding_confs,
   total_price_msat,
   price_msat_per_asset_unit,
@@ -63,9 +63,9 @@ INSERT INTO quotes (
                 params![
                     &record.quote_id,
                     &record.offer_id,
+                    direction_to_str(record.direction),
                     &record.asset_id,
                     record.asset_amount,
-                    &record.buyer_claim_address,
                     record.min_funding_confs,
                     record.total_price_msat,
                     record.price_msat_per_asset_unit,
@@ -87,9 +87,9 @@ INSERT INTO quotes (
 SELECT
   quote_id,
   offer_id,
+  direction,
   asset_id,
   asset_amount,
-  buyer_claim_address,
   min_funding_confs,
   total_price_msat,
   price_msat_per_asset_unit,
@@ -103,7 +103,7 @@ WHERE quote_id = ?1
 "#,
                 params![quote_id],
                 |row| {
-                    let asset_amount: i64 = row.get(3)?;
+                    let asset_amount: i64 = row.get(4)?;
                     let min_funding_confs: i64 = row.get(5)?;
                     let total_price_msat: i64 = row.get(6)?;
                     let price_msat_per_asset_unit: i64 = row.get(7)?;
@@ -111,19 +111,21 @@ WHERE quote_id = ?1
                     let refund_delta_blocks: i64 = row.get(9)?;
                     let invoice_expiry_secs: i64 = row.get(10)?;
                     let max_min_funding_confs: i64 = row.get(11)?;
+                    let direction_str: String = row.get(2)?;
+                    let direction = direction_from_str(&direction_str, 2)?;
 
                     Ok(QuoteRecord {
                         quote_id: row.get(0)?,
                         offer_id: row.get(1)?,
-                        asset_id: row.get(2)?,
+                        direction,
+                        asset_id: row.get(3)?,
                         asset_amount: u64::try_from(asset_amount).map_err(|_| {
                             rusqlite::Error::FromSqlConversionFailure(
-                                3,
+                                4,
                                 rusqlite::types::Type::Integer,
                                 format!("invalid asset_amount {asset_amount}").into(),
                             )
                         })?,
-                        buyer_claim_address: row.get(4)?,
                         min_funding_confs: u32::try_from(min_funding_confs).map_err(|_| {
                             rusqlite::Error::FromSqlConversionFailure(
                                 5,
@@ -205,12 +207,13 @@ WHERE quote_id = ?1
 INSERT INTO swaps (
   swap_id,
   quote_id,
+  direction,
   bolt11_invoice,
   payment_hash,
   asset_id,
   asset_amount,
   total_price_msat,
-  buyer_claim_address,
+  buyer_liquid_address,
   fee_subsidy_sats,
   refund_lock_height,
   p2wsh_address,
@@ -224,18 +227,19 @@ INSERT INTO swaps (
   claim_txid,
   status
 ) VALUES (
-  ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20
+  ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21
 )
 "#,
                 params![
                     &record.swap_id,
                     &record.quote_id,
+                    direction_to_str(record.direction),
                     &record.bolt11_invoice,
                     &record.payment_hash,
                     &record.asset_id,
                     record.asset_amount,
                     record.total_price_msat,
-                    &record.buyer_claim_address,
+                    &record.buyer_liquid_address,
                     record.fee_subsidy_sats,
                     record.refund_lock_height,
                     &record.p2wsh_address,
@@ -261,12 +265,13 @@ INSERT INTO swaps (
 SELECT
   swap_id,
   quote_id,
+  direction,
   bolt11_invoice,
   payment_hash,
   asset_id,
   asset_amount,
   total_price_msat,
-  buyer_claim_address,
+  buyer_liquid_address,
   fee_subsidy_sats,
   refund_lock_height,
   p2wsh_address,
@@ -355,12 +360,13 @@ WHERE swap_id = ?1
 SELECT
   swap_id,
   quote_id,
+  direction,
   bolt11_invoice,
   payment_hash,
   asset_id,
   asset_amount,
   total_price_msat,
-  buyer_claim_address,
+  buyer_liquid_address,
   fee_subsidy_sats,
   refund_lock_height,
   p2wsh_address,
@@ -392,79 +398,83 @@ ORDER BY swap_id
 }
 
 fn row_to_swap_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<SwapRecord> {
-    let asset_amount: i64 = row.get(5)?;
-    let total_price_msat: i64 = row.get(6)?;
-    let fee_subsidy_sats: i64 = row.get(8)?;
-    let refund_lock_height: i64 = row.get(9)?;
-    let asset_vout: i64 = row.get(13)?;
-    let lbtc_vout: i64 = row.get(14)?;
-    let min_funding_confs: i64 = row.get(15)?;
+    let asset_amount: i64 = row.get(6)?;
+    let total_price_msat: i64 = row.get(7)?;
+    let fee_subsidy_sats: i64 = row.get(9)?;
+    let refund_lock_height: i64 = row.get(10)?;
+    let asset_vout: i64 = row.get(14)?;
+    let lbtc_vout: i64 = row.get(15)?;
+    let min_funding_confs: i64 = row.get(16)?;
 
-    let status_str: String = row.get(19)?;
-    let status = status_from_str(&status_str, 19)?;
+    let direction_str: String = row.get(2)?;
+    let direction = direction_from_str(&direction_str, 2)?;
+
+    let status_str: String = row.get(20)?;
+    let status = status_from_str(&status_str, 20)?;
 
     Ok(SwapRecord {
         swap_id: row.get(0)?,
         quote_id: row.get(1)?,
-        bolt11_invoice: row.get(2)?,
-        payment_hash: row.get(3)?,
-        asset_id: row.get(4)?,
+        direction,
+        bolt11_invoice: row.get(3)?,
+        payment_hash: row.get(4)?,
+        asset_id: row.get(5)?,
         asset_amount: u64::try_from(asset_amount).map_err(|_| {
             rusqlite::Error::FromSqlConversionFailure(
-                5,
+                6,
                 rusqlite::types::Type::Integer,
                 format!("invalid asset_amount {asset_amount}").into(),
             )
         })?,
         total_price_msat: u64::try_from(total_price_msat).map_err(|_| {
             rusqlite::Error::FromSqlConversionFailure(
-                6,
+                7,
                 rusqlite::types::Type::Integer,
                 format!("invalid total_price_msat {total_price_msat}").into(),
             )
         })?,
-        buyer_claim_address: row.get(7)?,
+        buyer_liquid_address: row.get(8)?,
         fee_subsidy_sats: u64::try_from(fee_subsidy_sats).map_err(|_| {
             rusqlite::Error::FromSqlConversionFailure(
-                8,
+                9,
                 rusqlite::types::Type::Integer,
                 format!("invalid fee_subsidy_sats {fee_subsidy_sats}").into(),
             )
         })?,
         refund_lock_height: u32::try_from(refund_lock_height).map_err(|_| {
             rusqlite::Error::FromSqlConversionFailure(
-                9,
+                10,
                 rusqlite::types::Type::Integer,
                 format!("invalid refund_lock_height {refund_lock_height}").into(),
             )
         })?,
-        p2wsh_address: row.get(10)?,
-        witness_script_hex: row.get(11)?,
-        funding_txid: row.get(12)?,
+        p2wsh_address: row.get(11)?,
+        witness_script_hex: row.get(12)?,
+        funding_txid: row.get(13)?,
         asset_vout: u32::try_from(asset_vout).map_err(|_| {
             rusqlite::Error::FromSqlConversionFailure(
-                13,
+                14,
                 rusqlite::types::Type::Integer,
                 format!("invalid asset_vout {asset_vout}").into(),
             )
         })?,
         lbtc_vout: u32::try_from(lbtc_vout).map_err(|_| {
             rusqlite::Error::FromSqlConversionFailure(
-                14,
+                15,
                 rusqlite::types::Type::Integer,
                 format!("invalid lbtc_vout {lbtc_vout}").into(),
             )
         })?,
         min_funding_confs: u32::try_from(min_funding_confs).map_err(|_| {
             rusqlite::Error::FromSqlConversionFailure(
-                15,
+                16,
                 rusqlite::types::Type::Integer,
                 format!("invalid min_funding_confs {min_funding_confs}").into(),
             )
         })?,
-        ln_payment_id: row.get(16)?,
-        ln_preimage_hex: row.get(17)?,
-        claim_txid: row.get(18)?,
+        ln_payment_id: row.get(17)?,
+        ln_preimage_hex: row.get(18)?,
+        claim_txid: row.get(19)?,
         status,
     })
 }
@@ -475,9 +485,9 @@ fn migrate(conn: &Connection) -> Result<()> {
 CREATE TABLE IF NOT EXISTS quotes (
   quote_id TEXT PRIMARY KEY,
   offer_id TEXT NOT NULL,
+  direction TEXT NOT NULL,
   asset_id TEXT NOT NULL,
   asset_amount INTEGER NOT NULL,
-  buyer_claim_address TEXT NOT NULL,
   min_funding_confs INTEGER NOT NULL,
   total_price_msat INTEGER NOT NULL,
   price_msat_per_asset_unit INTEGER NOT NULL,
@@ -492,12 +502,13 @@ CREATE INDEX IF NOT EXISTS quotes_swap_id_idx ON quotes(swap_id);
 CREATE TABLE IF NOT EXISTS swaps (
   swap_id TEXT PRIMARY KEY,
   quote_id TEXT NOT NULL DEFAULT '',
+  direction TEXT NOT NULL,
   bolt11_invoice TEXT NOT NULL,
   payment_hash TEXT NOT NULL,
   asset_id TEXT NOT NULL,
   asset_amount INTEGER NOT NULL,
   total_price_msat INTEGER NOT NULL DEFAULT 0,
-  buyer_claim_address TEXT NOT NULL DEFAULT '',
+  buyer_liquid_address TEXT NOT NULL,
   fee_subsidy_sats INTEGER NOT NULL,
   refund_lock_height INTEGER NOT NULL,
   p2wsh_address TEXT NOT NULL,
@@ -533,6 +544,13 @@ fn ensure_columns(conn: &Connection) -> Result<()> {
         conn,
         "swaps",
         &swaps_cols,
+        "direction",
+        "TEXT NOT NULL DEFAULT 'ln_to_liquid'",
+    )?;
+    ensure_column(
+        conn,
+        "swaps",
+        &swaps_cols,
         "total_price_msat",
         "INTEGER NOT NULL DEFAULT 0",
     )?;
@@ -540,7 +558,7 @@ fn ensure_columns(conn: &Connection) -> Result<()> {
         conn,
         "swaps",
         &swaps_cols,
-        "buyer_claim_address",
+        "buyer_liquid_address",
         "TEXT NOT NULL DEFAULT ''",
     )?;
     ensure_column(conn, "swaps", &swaps_cols, "ln_payment_id", "TEXT")?;
@@ -548,6 +566,13 @@ fn ensure_columns(conn: &Connection) -> Result<()> {
     ensure_column(conn, "swaps", &swaps_cols, "claim_txid", "TEXT")?;
 
     let quotes_cols = table_columns(conn, "quotes").context("read quotes columns")?;
+    ensure_column(
+        conn,
+        "quotes",
+        &quotes_cols,
+        "direction",
+        "TEXT NOT NULL DEFAULT 'ln_to_liquid'",
+    )?;
     ensure_column(conn, "quotes", &quotes_cols, "swap_id", "TEXT")?;
 
     Ok(())
@@ -580,6 +605,25 @@ fn ensure_column(
     conn.execute(&format!("ALTER TABLE {table} ADD COLUMN {name} {decl}"), [])
         .with_context(|| format!("add column {table}.{name}"))?;
     Ok(())
+}
+
+fn direction_to_str(direction: SwapDirection) -> &'static str {
+    match direction {
+        SwapDirection::LnToLiquid => "ln_to_liquid",
+        SwapDirection::LiquidToLn => "liquid_to_ln",
+    }
+}
+
+fn direction_from_str(s: &str, col: usize) -> rusqlite::Result<SwapDirection> {
+    match s {
+        "ln_to_liquid" => Ok(SwapDirection::LnToLiquid),
+        "liquid_to_ln" => Ok(SwapDirection::LiquidToLn),
+        other => Err(rusqlite::Error::FromSqlConversionFailure(
+            col,
+            rusqlite::types::Type::Text,
+            format!("unknown swap direction: {other}").into(),
+        )),
+    }
 }
 
 fn status_to_str(status: SwapStatus) -> &'static str {

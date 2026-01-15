@@ -14,17 +14,25 @@ pub enum SwapStatus {
     Failed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwapDirection {
+    LnToLiquid,
+    LiquidToLn,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SwapRecord {
     pub swap_id: String,
     pub quote_id: String,
+    pub direction: SwapDirection,
     pub bolt11_invoice: String,
     pub payment_hash: String,
 
     pub asset_id: String,
     pub asset_amount: u64,
     pub total_price_msat: u64,
-    pub buyer_claim_address: String,
+    pub buyer_liquid_address: String,
     pub fee_subsidy_sats: u64,
     pub refund_lock_height: u32,
 
@@ -47,10 +55,10 @@ pub struct SwapRecord {
 pub struct QuoteRecord {
     pub quote_id: String,
     pub offer_id: String,
+    pub direction: SwapDirection,
 
     pub asset_id: String,
     pub asset_amount: u64,
-    pub buyer_claim_address: String,
     pub min_funding_confs: u32,
     pub total_price_msat: u64,
 

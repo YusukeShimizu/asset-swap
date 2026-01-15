@@ -109,7 +109,6 @@ purpose
     Expose two directions in the API: LN_TO_LIQUID and LIQUID_TO_LN.
     LN_TO_LIQUID is a submarine swap.
     LIQUID_TO_LN is a reverse submarine swap.
-    Current implementation supports LN_TO_LIQUID only.
     Require authentication and authorization via bearer token.
     Seller can create quotes.
     Buyer can create swaps from quotes.
@@ -143,8 +142,16 @@ actions
             - claim path requires `Swap.parties.liquid_claimer` signature, and
             - refund path requires `Swap.parties.liquid_refunder` signature.
         server MUST fund the Liquid HTLC before returning `bolt11_invoice`
-        server MUST create a BOLT11 invoice for `Swap.parties.ln_payee`
-        server MUST set invoice amount to `Quote.total_price_msat`
+        for LN_TO_LIQUID:
+            server MUST reject if `buyer_bolt11_invoice` is set
+            server MUST create a BOLT11 invoice for `Swap.parties.ln_payee`
+            server MUST set invoice amount to `Quote.total_price_msat`
+        for LIQUID_TO_LN:
+            server MUST reject if `buyer_bolt11_invoice` is empty
+            server MUST reject if `buyer_bolt11_invoice` has no amount
+            server MUST reject if `buyer_bolt11_invoice` amount differs from `Quote.total_price_msat`
+            server MUST reject if `buyer_bolt11_invoice` is expired (best-effort)
+            server MUST use `buyer_bolt11_invoice` as `Swap.bolt11_invoice`
     get_swap [ auth_token: string; swap_id: string ]
         => [ found: boolean ]
         server MUST reject if `auth_token` is not `buyer_token` and not `seller_token`
@@ -171,6 +178,17 @@ operational principle
         => [ claim_txid: "<TXID>" ]
     then get_swap [ auth_token: "<BUYER_TOKEN>"; swap_id: "<UUID>" ]
         => [ found: true ]
+    ---
+    after create_quote [ auth_token: "<SELLER_TOKEN>"; direction: "LIQUID_TO_LN"; asset_id: "<ASSET_ID>"; asset_amount: 1000; min_funding_confs: 1 ]
+        => [ quote_id: "<UUID>"; total_price_msat: 1000000 ]
+    then create_swap [ auth_token: "<BUYER_TOKEN>"; quote_id: "<UUID>"; buyer_liquid_address: "<BUYER_LIQUID_ADDRESS>"; buyer_bolt11_invoice: "<BUYER_BOLT11_INVOICE>" ]
+        => [ swap_id: "<UUID>" ]
+    then create_lightning_payment [ auth_token: "<SELLER_TOKEN>"; swap_id: "<UUID>" ]
+        => [ payment_id: "<UUID>" ]
+    then create_asset_claim [ auth_token: "<SELLER_TOKEN>"; swap_id: "<UUID>" ]
+        => [ claim_txid: "<TXID>" ]
+    then get_swap [ auth_token: "<SELLER_TOKEN>"; swap_id: "<UUID>" ]
+        => [ found: true ]
 ```
 
 ```text
@@ -180,18 +198,18 @@ purpose
     Embed a hashlock that matches the LN invoice payment hash.
 state
     payment_hash: bytes
-    buyer_pubkey_hash160: bytes
-    seller_pubkey_hash160: bytes
+    claimer_pubkey_hash160: bytes
+    refunder_pubkey_hash160: bytes
     refund_lock_height: uint32
 actions
-    build [ payment_hash: bytes; buyer_pubkey_hash160: bytes; seller_pubkey_hash160: bytes; refund_lock_height: uint32 ]
+    build [ payment_hash: bytes; claimer_pubkey_hash160: bytes; refunder_pubkey_hash160: bytes; refund_lock_height: uint32 ]
         => [ witness_script: bytes; p2wsh_address: string ]
         witness_script MUST use `OP_SHA256` for hashlock
         witness_script MUST use `OP_CHECKLOCKTIMEVERIFY` for timelock (CLTV)
         claim path MUST require liquid_claimer signature (preimage-only spend MUST NOT be allowed)
         refund path MUST require liquid_refunder signature and CLTV
 operational principle
-    after build [ payment_hash: "<HASH>"; buyer_pubkey_hash160: "<PKH>"; seller_pubkey_hash160: "<PKH>"; refund_lock_height: 1000 ]
+    after build [ payment_hash: "<HASH>"; claimer_pubkey_hash160: "<PKH>"; refunder_pubkey_hash160: "<PKH>"; refund_lock_height: 1000 ]
         => [ p2wsh_address: "<ADDR>" ]
 ```
 

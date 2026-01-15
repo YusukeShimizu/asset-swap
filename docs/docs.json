@@ -10,11 +10,11 @@
     "groups": [
       {
         "group": "Getting Started",
-        "pages": ["index"]
+        "pages": ["index", "getting-started/beginner-setup"]
       },
       {
         "group": "Swap",
-        "pages": ["swap/ln-liquid-swap", "swap/rwa-issuance-and-sale"]
+        "pages": ["swap/ln-liquid-swap", "swap/protocol-overview", "swap/rwa-issuance-and-sale"]
       },
       {
         "group": "API (Protobuf)",

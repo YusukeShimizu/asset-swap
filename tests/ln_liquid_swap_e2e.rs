@@ -48,6 +48,16 @@ const SELLER_SLIP77: &str = "000000000000000000000000000000000000000000000000000
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires `bitcoind`, `ldk-server`, `elementsd`, and liquid-enabled `electrs` (run via `nix develop`)"]
 async fn ln_to_liquid_swap_create_pay_claim() -> Result<()> {
+    run_swap(SwapDirection::LnToLiquid).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires `bitcoind`, `ldk-server`, `elementsd`, and liquid-enabled `electrs` (run via `nix develop`)"]
+async fn liquid_to_ln_swap_create_pay_claim() -> Result<()> {
+    run_swap(SwapDirection::LiquidToLn).await
+}
+
+async fn run_swap(direction: SwapDirection) -> Result<()> {
     let _ = ln_liquid_swap::logging::init();
 
     // --- LN: bitcoind + ldk-server ---
@@ -280,7 +290,7 @@ async fn ln_to_liquid_swap_create_pay_claim() -> Result<()> {
         .sync()
         .context("sync seller after receiving asset")?;
 
-    // --- Swap gRPC server (seller LN = bob, buyer LN = alice) ---
+    // --- Swap gRPC server ---
     let store_path = seller_dir.path().join("store.sqlite3");
     let store = SqliteStore::open(store_path).context("create sqlite store")?;
     let store = Arc::new(Mutex::new(store));
@@ -297,7 +307,12 @@ async fn ln_to_liquid_swap_create_pay_claim() -> Result<()> {
         seller_token: "seller-token".to_string(),
         buyer_token: "buyer-token".to_string(),
     };
-    let ln = LdkLightningClient::new(alice.rest_service_address().to_string());
+    let (ln_payer, ln_payee, ln_payer_label) = match direction {
+        SwapDirection::LnToLiquid => (&alice, &bob, "alice"),
+        SwapDirection::LiquidToLn => (&bob, &alice, "bob"),
+        SwapDirection::Unspecified => anyhow::bail!("direction must be specified"),
+    };
+    let ln = LdkLightningClient::new(ln_payer.rest_service_address().to_string());
     let svc = SwapServiceImpl::new(cfg, ln, wallet.clone(), store);
 
     let port = get_available_port().context("select gRPC port")?;
@@ -322,7 +337,7 @@ async fn ln_to_liquid_swap_create_pay_claim() -> Result<()> {
         .create_quote(with_auth(
             "seller-token",
             CreateQuoteRequest {
-                direction: SwapDirection::LnToLiquid as i32,
+                direction: direction as i32,
                 asset_id: asset_id.to_string(),
                 asset_amount,
                 min_funding_confs: 1,
@@ -337,6 +352,19 @@ async fn ln_to_liquid_swap_create_pay_claim() -> Result<()> {
         .address_at(1)
         .context("get buyer liquid address")?
         .to_string();
+    let buyer_invoice = if matches!(direction, SwapDirection::LiquidToLn) {
+        let buyer_ln = LdkLightningClient::new(ln_payee.rest_service_address().to_string());
+        buyer_ln
+            .create_invoice(
+                quote.total_price_msat,
+                format!("swap:{}", quote.quote_id),
+                3600,
+            )
+            .await
+            .context("create buyer invoice")?
+    } else {
+        String::new()
+    };
 
     let swap = {
         let mut create_fut = Box::pin(swap_client.create_swap(with_auth(
@@ -344,7 +372,7 @@ async fn ln_to_liquid_swap_create_pay_claim() -> Result<()> {
             CreateSwapRequest {
                 quote_id: quote.quote_id.clone(),
                 buyer_liquid_address,
-                buyer_bolt11_invoice: String::new(),
+                buyer_bolt11_invoice: buyer_invoice.clone(),
             },
         )));
 
@@ -367,6 +395,12 @@ async fn ln_to_liquid_swap_create_pay_claim() -> Result<()> {
     };
 
     anyhow::ensure!(swap.quote_id == quote.quote_id, "quote_id mismatch");
+    if matches!(direction, SwapDirection::LiquidToLn) {
+        anyhow::ensure!(
+            swap.bolt11_invoice == buyer_invoice,
+            "bolt11_invoice mismatch"
+        );
+    }
 
     let invoice_hash = payment_hash_from_bolt11(&swap.bolt11_invoice).context("parse invoice")?;
     let resp_hash = hex::decode(&swap.payment_hash).context("decode payment_hash")?;
@@ -375,9 +409,14 @@ async fn ln_to_liquid_swap_create_pay_claim() -> Result<()> {
         .map_err(|_| anyhow::anyhow!("payment_hash must be 32 bytes"))?;
     anyhow::ensure!(invoice_hash == resp_hash, "payment_hash mismatch");
 
+    let ln_payer_token = match direction {
+        SwapDirection::LnToLiquid => "buyer-token",
+        SwapDirection::LiquidToLn => "seller-token",
+        SwapDirection::Unspecified => anyhow::bail!("direction must be specified"),
+    };
     let pay_resp = swap_client
         .create_lightning_payment(with_auth(
-            "buyer-token",
+            ln_payer_token,
             CreateLightningPaymentRequest {
                 swap_id: swap.swap_id.clone(),
                 payment_timeout_secs: 60,
@@ -393,9 +432,14 @@ async fn ln_to_liquid_swap_create_pay_claim() -> Result<()> {
         .map_err(|_| anyhow::anyhow!("preimage must be 32 bytes"))?;
     anyhow::ensure!(sha256_preimage(&preimage) == resp_hash, "preimage mismatch");
 
+    let liquid_claimer_token = match direction {
+        SwapDirection::LnToLiquid => "buyer-token",
+        SwapDirection::LiquidToLn => "seller-token",
+        SwapDirection::Unspecified => anyhow::bail!("direction must be specified"),
+    };
     let claim_resp = swap_client
         .create_asset_claim(with_auth(
-            "buyer-token",
+            liquid_claimer_token,
             CreateAssetClaimRequest {
                 swap_id: swap.swap_id.clone(),
                 claim_fee_sats: 500,
@@ -416,31 +460,28 @@ async fn ln_to_liquid_swap_create_pay_claim() -> Result<()> {
     let _ = shutdown_tx.send(());
 
     // Extra observation: alice outbound payment succeeded.
-    wait_for(
-        "alice outbound payment succeeded",
-        Duration::from_secs(30),
-        || {
-            let client = alice.client();
-            async move {
-                let payments = match client
-                    .list_payments(ListPaymentsRequest { page_token: None })
-                    .await
-                {
-                    Ok(r) => r.payments,
-                    Err(_) => return Ok(None),
-                };
-                let has_succeeded = payments.into_iter().any(|p| {
-                    p.direction == PaymentDirection::Outbound as i32
-                        && p.status == PaymentStatus::Succeeded as i32
-                        && matches!(
-                            p.kind.as_ref().and_then(|k| k.kind.as_ref()),
-                            Some(payment_kind::Kind::Bolt11(_))
-                        )
-                });
-                Ok(has_succeeded.then_some(()))
-            }
-        },
-    )
+    let outbound_desc = format!("{ln_payer_label} outbound payment succeeded");
+    wait_for(&outbound_desc, Duration::from_secs(30), || {
+        let client = ln_payer.client();
+        async move {
+            let payments = match client
+                .list_payments(ListPaymentsRequest { page_token: None })
+                .await
+            {
+                Ok(r) => r.payments,
+                Err(_) => return Ok(None),
+            };
+            let has_succeeded = payments.into_iter().any(|p| {
+                p.direction == PaymentDirection::Outbound as i32
+                    && p.status == PaymentStatus::Succeeded as i32
+                    && matches!(
+                        p.kind.as_ref().and_then(|k| k.kind.as_ref()),
+                        Some(payment_kind::Kind::Bolt11(_))
+                    )
+            });
+            Ok(has_succeeded.then_some(()))
+        }
+    })
     .await?;
 
     tracing::info!(%claim_txid, "swap e2e completed");

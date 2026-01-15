@@ -1,0 +1,73 @@
+---
+title: Beginner Setup (Local)
+description: Simple, non-technical steps to open the project and run the basic checks.
+---
+
+This guide helps you open the project on your computer and run the basic checks.
+You do not need to write code.
+
+## What You Will Do
+
+- Install one tool (Nix) that prepares the environment.
+- Open the project folder in a terminal.
+- Run the standard checks.
+
+## Requirements
+
+- macOS or Linux.
+- A stable internet connection.
+- Enough disk space for downloads (several GB).
+
+If you use Windows, use WSL2 and follow the Linux steps.
+
+## Step 1: Install Nix
+
+Install Nix from the official installer.
+If you cannot install software on this computer, ask a developer for help.
+
+## Step 2: Open the Project Folder
+
+If you already have the project folder, open a terminal and move into it.
+For example:
+
+```sh
+cd /path/to/asset-swap
+```
+
+If you do not have the project yet, ask a developer for the correct link.
+
+## Step 3: Enter the Development Environment
+
+Run this command and wait until it finishes:
+
+```sh
+nix develop
+```
+
+This command downloads the tools the project needs.
+The first run can take several minutes.
+
+## Step 4: Run the Standard Checks
+
+Run the full check suite:
+
+```sh
+just ci
+```
+
+You should see a success message.
+Some end-to-end tests are skipped by default, which is expected.
+
+## Next Steps
+
+- For the API overview, read [LN⇄Liquid Swap (gRPC)](/swap/ln-liquid-swap).
+- For a full regtest demo, read [Issue and sell an RWA (regtest)](/swap/rwa-issuance-and-sale).
+
+## Troubleshooting
+
+- `nix: command not found`
+  - Nix is not installed. Go back to Step 1.
+- `just: command not found`
+  - Run `nix develop` again and retry the command.
+- The checks take a long time
+  - This is normal on the first run. It downloads dependencies.

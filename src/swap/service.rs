@@ -9,7 +9,9 @@ use prost::Message as _;
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
-use crate::lightning::invoice::payment_hash_from_bolt11;
+use crate::lightning::invoice::{
+    amount_msat_from_bolt11, is_expired_bolt11, payment_hash_from_bolt11,
+};
 use crate::lightning::ldk::LdkLightningClient;
 use crate::liquid::htlc::{
     HtlcFunding, HtlcSpec, claim_tx_from_witness_script, pubkey_hash160_from_p2wpkh_address,
@@ -19,7 +21,7 @@ use crate::liquid::keys::derive_secret_key;
 use crate::liquid::wallet::LiquidWallet;
 use crate::proto::v1 as pb;
 use crate::swap::store::SqliteStore;
-use crate::swap::{QuoteRecord, SwapRecord, SwapStatus};
+use crate::swap::{QuoteRecord, SwapDirection, SwapRecord, SwapStatus};
 
 const MAX_MIN_FUNDING_CONFS: u32 = 6;
 const DEFAULT_PAYMENT_TIMEOUT_SECS: u64 = 60;
@@ -91,7 +93,10 @@ impl SwapServiceImpl {
     }
 
     fn current_offer(&self) -> pb::Offer {
-        let supported_directions = vec![pb::SwapDirection::LnToLiquid as i32];
+        let supported_directions = vec![
+            pb::SwapDirection::LnToLiquid as i32,
+            pb::SwapDirection::LiquidToLn as i32,
+        ];
         pb::Offer {
             asset_id: self.cfg.sell_asset_id.to_string(),
             supported_directions,
@@ -111,14 +116,25 @@ impl SwapServiceImpl {
         hex::encode(sha256::Hash::hash(&buf).to_byte_array())
     }
 
+    fn direction_to_proto(direction: SwapDirection) -> pb::SwapDirection {
+        match direction {
+            SwapDirection::LnToLiquid => pb::SwapDirection::LnToLiquid,
+            SwapDirection::LiquidToLn => pb::SwapDirection::LiquidToLn,
+        }
+    }
+
     fn quote_record_to_proto(record: &QuoteRecord) -> pb::Quote {
-        let direction = pb::SwapDirection::LnToLiquid;
+        let direction = Self::direction_to_proto(record.direction);
+        let supported_directions = vec![
+            pb::SwapDirection::LnToLiquid as i32,
+            pb::SwapDirection::LiquidToLn as i32,
+        ];
         pb::Quote {
             quote_id: record.quote_id.clone(),
             offer_id: record.offer_id.clone(),
             offer: Some(pb::Offer {
                 asset_id: record.asset_id.clone(),
-                supported_directions: vec![direction as i32],
+                supported_directions,
                 price_msat_per_asset_unit: record.price_msat_per_asset_unit,
                 fee_subsidy_sats: record.fee_subsidy_sats,
                 refund_delta_blocks: record.refund_delta_blocks,
@@ -223,7 +239,7 @@ impl SwapServiceImpl {
         let witness_script =
             hex::decode(&record.witness_script_hex).context("decode witness_script_hex")?;
 
-        let direction = pb::SwapDirection::LnToLiquid;
+        let direction = Self::direction_to_proto(record.direction);
         Ok(pb::Swap {
             swap_id: record.swap_id.clone(),
             direction: direction as i32,
@@ -296,6 +312,13 @@ impl pb::swap_service_server::SwapService for SwapServiceImpl {
         if direction == pb::SwapDirection::Unspecified {
             return Err(Status::invalid_argument("direction is required"));
         }
+        let direction = match direction {
+            pb::SwapDirection::LnToLiquid => SwapDirection::LnToLiquid,
+            pb::SwapDirection::LiquidToLn => SwapDirection::LiquidToLn,
+            pb::SwapDirection::Unspecified => {
+                return Err(Status::invalid_argument("direction is required"));
+            }
+        };
 
         let asset_amount = req.asset_amount;
         if asset_amount == 0 {
@@ -315,15 +338,11 @@ impl pb::swap_service_server::SwapService for SwapServiceImpl {
             )));
         }
 
-        let buyer_claim_address = self
-            .wallet
-            .lock()
-            .expect("wallet mutex poisoned")
-            .address_at(self.cfg.buyer_key_index)
-            .map_err(|e| Status::internal(format!("get buyer claim address: {e:#}")))?;
-
         let offer = self.current_offer();
-        if !offer.supported_directions.contains(&(direction as i32)) {
+        if !offer
+            .supported_directions
+            .contains(&(Self::direction_to_proto(direction) as i32))
+        {
             return Err(Status::failed_precondition("unsupported direction"));
         }
 
@@ -336,9 +355,9 @@ impl pb::swap_service_server::SwapService for SwapServiceImpl {
         let record = QuoteRecord {
             quote_id: quote_id.clone(),
             offer_id: offer_id.clone(),
+            direction,
             asset_id: offer.asset_id.clone(),
             asset_amount,
-            buyer_claim_address: buyer_claim_address.to_string(),
             min_funding_confs,
             total_price_msat,
             price_msat_per_asset_unit: offer.price_msat_per_asset_unit,
@@ -391,12 +410,6 @@ impl pb::swap_service_server::SwapService for SwapServiceImpl {
         if req.buyer_liquid_address.trim().is_empty() {
             return Err(Status::invalid_argument("buyer_liquid_address is required"));
         }
-        if !req.buyer_bolt11_invoice.trim().is_empty() {
-            return Err(Status::unimplemented(
-                "reverse submarine swap (buyer_bolt11_invoice) is not implemented",
-            ));
-        }
-
         let quote = self
             .store
             .lock()
@@ -432,7 +445,7 @@ impl pb::swap_service_server::SwapService for SwapServiceImpl {
             return Err(Status::failed_precondition("unsupported asset_id"));
         }
 
-        let buyer_claim_address = Address::from_str(&req.buyer_liquid_address)
+        let buyer_liquid_address = Address::from_str(&req.buyer_liquid_address)
             .map_err(|e| Status::invalid_argument(format!("invalid buyer_liquid_address: {e}")))?;
 
         let min_funding_confs = quote.min_funding_confs;
@@ -442,7 +455,7 @@ impl pb::swap_service_server::SwapService for SwapServiceImpl {
             )));
         }
 
-        let buyer_pubkey_hash160 = pubkey_hash160_from_p2wpkh_address(&buyer_claim_address)
+        let buyer_pubkey_hash160 = pubkey_hash160_from_p2wpkh_address(&buyer_liquid_address)
             .map_err(|e| {
                 Status::invalid_argument(format!(
                     "buyer_liquid_address must be a P2WPKH address: {e}"
@@ -455,25 +468,64 @@ impl pb::swap_service_server::SwapService for SwapServiceImpl {
             .expect("wallet mutex poisoned")
             .network()
             .address_params();
-        if buyer_claim_address.params != params {
+        if buyer_liquid_address.params != params {
             return Err(Status::invalid_argument(
                 "buyer_liquid_address network mismatch",
             ));
         }
 
         let swap_id = Uuid::new_v4().to_string();
-        let invoice = self
-            .ln
-            .create_invoice(
-                quote.total_price_msat,
-                format!("swap:{swap_id}"),
-                quote.invoice_expiry_secs,
-            )
-            .await
-            .map_err(|e| Status::internal(format!("create invoice: {e:#}")))?;
+        let (invoice, payment_hash) = match quote.direction {
+            SwapDirection::LnToLiquid => {
+                if !req.buyer_bolt11_invoice.trim().is_empty() {
+                    return Err(Status::invalid_argument(
+                        "buyer_bolt11_invoice must be empty for LN_TO_LIQUID swaps",
+                    ));
+                }
+                let invoice = self
+                    .ln
+                    .create_invoice(
+                        quote.total_price_msat,
+                        format!("swap:{swap_id}"),
+                        quote.invoice_expiry_secs,
+                    )
+                    .await
+                    .map_err(|e| Status::internal(format!("create invoice: {e:#}")))?;
+                let payment_hash = payment_hash_from_bolt11(&invoice)
+                    .map_err(|e| Status::internal(format!("parse invoice: {e:#}")))?;
+                (invoice, payment_hash)
+            }
+            SwapDirection::LiquidToLn => {
+                let buyer_invoice = req.buyer_bolt11_invoice.trim();
+                if buyer_invoice.is_empty() {
+                    return Err(Status::invalid_argument(
+                        "buyer_bolt11_invoice is required for LIQUID_TO_LN swaps",
+                    ));
+                }
+                let amount_msat = amount_msat_from_bolt11(buyer_invoice)
+                    .map_err(|e| Status::invalid_argument(format!("invalid invoice: {e:#}")))?;
+                let amount_msat = amount_msat.ok_or_else(|| {
+                    Status::invalid_argument("buyer_bolt11_invoice must specify amount")
+                })?;
+                if amount_msat != quote.total_price_msat {
+                    return Err(Status::invalid_argument(format!(
+                        "buyer_bolt11_invoice amount mismatch: expected {} msat, got {} msat",
+                        quote.total_price_msat, amount_msat
+                    )));
+                }
+                let expired = is_expired_bolt11(buyer_invoice)
+                    .map_err(|e| Status::invalid_argument(format!("invalid invoice: {e:#}")))?;
+                if expired {
+                    return Err(Status::invalid_argument(
+                        "buyer_bolt11_invoice is already expired",
+                    ));
+                }
+                let payment_hash = payment_hash_from_bolt11(buyer_invoice)
+                    .map_err(|e| Status::invalid_argument(format!("invalid invoice: {e:#}")))?;
+                (buyer_invoice.to_string(), payment_hash)
+            }
+        };
 
-        let payment_hash = payment_hash_from_bolt11(&invoice)
-            .map_err(|e| Status::internal(format!("parse invoice: {e:#}")))?;
         let payment_hash_hex = hex::encode(payment_hash);
 
         let wallet = self.wallet.clone();
@@ -481,6 +533,7 @@ impl pb::swap_service_server::SwapService for SwapServiceImpl {
         let cfg = self.cfg.clone();
         let quote_id = quote.quote_id.clone();
 
+        let direction = quote.direction;
         let record = tokio::task::spawn_blocking(move || -> Result<SwapRecord> {
             let (mut record, htlc_script_pubkey, funding_txid) = {
                 let mut wallet = wallet.lock().expect("wallet mutex poisoned");
@@ -495,10 +548,15 @@ impl pb::swap_service_server::SwapService for SwapServiceImpl {
                     pubkey_hash160_from_p2wpkh_address(&seller_refund_address)
                         .context("extract seller pubkey hash")?;
 
+                let (claimer_pubkey_hash160, refunder_pubkey_hash160) = match direction {
+                    SwapDirection::LnToLiquid => (buyer_pubkey_hash160, seller_pubkey_hash160),
+                    SwapDirection::LiquidToLn => (seller_pubkey_hash160, buyer_pubkey_hash160),
+                };
+
                 let spec = HtlcSpec {
                     payment_hash,
-                    buyer_pubkey_hash160,
-                    seller_pubkey_hash160,
+                    claimer_pubkey_hash160,
+                    refunder_pubkey_hash160,
                     refund_lock_height,
                 };
 
@@ -518,12 +576,13 @@ impl pb::swap_service_server::SwapService for SwapServiceImpl {
                 let record = SwapRecord {
                     swap_id: swap_id.clone(),
                     quote_id: quote_id.clone(),
+                    direction,
                     bolt11_invoice: invoice.clone(),
                     payment_hash: payment_hash_hex.clone(),
                     asset_id: cfg.sell_asset_id.to_string(),
                     asset_amount: quote.asset_amount,
                     total_price_msat: quote.total_price_msat,
-                    buyer_claim_address: buyer_claim_address.to_string(),
+                    buyer_liquid_address: buyer_liquid_address.to_string(),
                     fee_subsidy_sats: cfg.fee_subsidy_sats,
                     refund_lock_height,
                     p2wsh_address: htlc_address.to_string(),
@@ -615,7 +674,7 @@ impl pb::swap_service_server::SwapService for SwapServiceImpl {
             .map_err(|e| Status::internal(format!("get swap: {e:#}")))?
             .ok_or_else(|| Status::not_found("swap not found"))?;
 
-        let direction = pb::SwapDirection::LnToLiquid;
+        let direction = Self::direction_to_proto(record.direction);
         let parties = Self::parties_for_direction(direction);
         let ln_payer =
             pb::SwapRole::try_from(parties.ln_payer).unwrap_or(pb::SwapRole::Unspecified);
@@ -700,7 +759,7 @@ impl pb::swap_service_server::SwapService for SwapServiceImpl {
             .map_err(|e| Status::internal(format!("get swap: {e:#}")))?
             .ok_or_else(|| Status::not_found("swap not found"))?;
 
-        let direction = pb::SwapDirection::LnToLiquid;
+        let direction = Self::direction_to_proto(record.direction);
         let parties = Self::parties_for_direction(direction);
         let liquid_claimer =
             pb::SwapRole::try_from(parties.liquid_claimer).unwrap_or(pb::SwapRole::Unspecified);
@@ -729,21 +788,33 @@ impl pb::swap_service_server::SwapService for SwapServiceImpl {
         let store = self.store.clone();
         let cfg = self.cfg.clone();
         let record_swap_id = record.swap_id.clone();
+        let record_direction = record.direction;
+        let record_buyer_liquid_address = record.buyer_liquid_address.clone();
 
         let claim_txid = tokio::task::spawn_blocking(move || -> Result<String> {
             let mut wallet = wallet.lock().expect("wallet mutex poisoned");
             wallet.sync().context("sync liquid wallet")?;
 
-            let buyer_receive = wallet
-                .address_at(cfg.buyer_key_index)
-                .context("get buyer receive address")?;
-            anyhow::ensure!(
-                buyer_receive.to_string() == record.buyer_claim_address,
-                "buyer_claim_address mismatch"
-            );
+            let (claimer_key_index, expected_address) = match record_direction {
+                SwapDirection::LnToLiquid => (
+                    cfg.buyer_key_index,
+                    Some(record_buyer_liquid_address.as_str()),
+                ),
+                SwapDirection::LiquidToLn => (cfg.seller_key_index, None),
+            };
 
-            let buyer_secret_key = derive_secret_key(wallet.signer(), cfg.buyer_key_index)
-                .context("derive buyer secret key")?;
+            let claimer_receive = wallet
+                .address_at(claimer_key_index)
+                .context("get claimer receive address")?;
+            if let Some(expected_address) = expected_address {
+                anyhow::ensure!(
+                    claimer_receive.to_string() == expected_address,
+                    "buyer_liquid_address mismatch"
+                );
+            }
+
+            let claimer_secret_key = derive_secret_key(wallet.signer(), claimer_key_index)
+                .context("derive claimer secret key")?;
 
             let witness_script: Script = record
                 .witness_script_hex
@@ -766,8 +837,8 @@ impl pb::swap_service_server::SwapService for SwapServiceImpl {
             let tx = claim_tx_from_witness_script(
                 &witness_script,
                 &funding,
-                &buyer_receive,
-                &buyer_secret_key,
+                &claimer_receive,
+                &claimer_secret_key,
                 preimage,
                 claim_fee_sats,
             )

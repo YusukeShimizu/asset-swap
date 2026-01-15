@@ -1,15 +1,15 @@
 use anyhow::{Context as _, Result};
 
 use ln_liquid_swap::swap::store::SqliteStore;
-use ln_liquid_swap::swap::{QuoteRecord, SwapRecord, SwapStatus};
+use ln_liquid_swap::swap::{QuoteRecord, SwapDirection, SwapRecord, SwapStatus};
 
 fn sample_quote(quote_id: &str) -> QuoteRecord {
     QuoteRecord {
         quote_id: quote_id.to_string(),
         offer_id: format!("offer_id:{quote_id}"),
+        direction: SwapDirection::LnToLiquid,
         asset_id: format!("asset_id:{quote_id}"),
         asset_amount: 1000,
-        buyer_claim_address: format!("buyer_claim_address:{quote_id}"),
         min_funding_confs: 1,
         total_price_msat: 1_000_000,
         price_msat_per_asset_unit: 1000,
@@ -25,12 +25,13 @@ fn sample_swap(swap_id: &str, quote_id: &str, status: SwapStatus) -> SwapRecord 
     SwapRecord {
         swap_id: swap_id.to_string(),
         quote_id: quote_id.to_string(),
+        direction: SwapDirection::LnToLiquid,
         bolt11_invoice: format!("invoice:{swap_id}"),
         payment_hash: format!("payment_hash:{swap_id}"),
         asset_id: format!("asset_id:{swap_id}"),
         asset_amount: 1000,
         total_price_msat: 1_000_000,
-        buyer_claim_address: format!("buyer_claim_address:{swap_id}"),
+        buyer_liquid_address: format!("buyer_liquid_address:{swap_id}"),
         fee_subsidy_sats: 10_000,
         refund_lock_height: 123,
         p2wsh_address: format!("p2wsh:{swap_id}"),

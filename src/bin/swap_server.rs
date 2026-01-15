@@ -11,9 +11,9 @@ use ln_liquid_swap::liquid::htlc::{HtlcFunding, refund_tx_from_witness_script};
 use ln_liquid_swap::liquid::keys::derive_secret_key;
 use ln_liquid_swap::liquid::wallet::LiquidWallet;
 use ln_liquid_swap::proto::v1::swap_service_server::SwapServiceServer;
-use ln_liquid_swap::swap::SwapStatus;
 use ln_liquid_swap::swap::service::{SwapServiceConfig, SwapServiceImpl};
 use ln_liquid_swap::swap::store::SqliteStore;
+use ln_liquid_swap::swap::{SwapDirection, SwapStatus};
 use lwk_wollet::ElementsNetwork;
 use tonic::transport::Server;
 
@@ -155,6 +155,7 @@ async fn main() -> Result<()> {
         wallet.clone(),
         store.clone(),
         cfg.seller_key_index,
+        cfg.buyer_key_index,
         Duration::from_secs(args.refund_poll_interval_secs),
         args.refund_fee_sats,
     );
@@ -174,6 +175,7 @@ fn spawn_refund_worker(
     wallet: Arc<Mutex<LiquidWallet>>,
     store: Arc<Mutex<SqliteStore>>,
     seller_key_index: u32,
+    buyer_key_index: u32,
     poll_interval: Duration,
     fee_sats: u64,
 ) {
@@ -182,7 +184,7 @@ fn spawn_refund_worker(
             match tokio::task::spawn_blocking({
                 let wallet = wallet.clone();
                 let store = store.clone();
-                move || refund_once(wallet, store, seller_key_index, fee_sats)
+                move || refund_once(wallet, store, seller_key_index, buyer_key_index, fee_sats)
             })
             .await
             {
@@ -204,6 +206,7 @@ fn refund_once(
     wallet: Arc<Mutex<LiquidWallet>>,
     store: Arc<Mutex<SqliteStore>>,
     seller_key_index: u32,
+    buyer_key_index: u32,
     fee_sats: u64,
 ) -> Result<()> {
     let mut wallet = wallet.lock().expect("wallet mutex poisoned");
@@ -243,19 +246,30 @@ fn refund_once(
             fee_subsidy_sats: s.fee_subsidy_sats,
         };
 
-        let seller_receive = wallet
-            .address_at(seller_key_index)
-            .context("get seller receive address")?;
+        let (refunder_key_index, expected_address) = match s.direction {
+            SwapDirection::LnToLiquid => (seller_key_index, None),
+            SwapDirection::LiquidToLn => (buyer_key_index, Some(s.buyer_liquid_address.as_str())),
+        };
 
-        let seller_secret_key = derive_secret_key(wallet.signer(), seller_key_index)
-            .context("derive seller secret key")?;
+        let refunder_receive = wallet
+            .address_at(refunder_key_index)
+            .context("get refunder receive address")?;
+        if let Some(expected_address) = expected_address {
+            anyhow::ensure!(
+                refunder_receive.to_string() == expected_address,
+                "buyer_liquid_address mismatch"
+            );
+        }
+
+        let refunder_secret_key = derive_secret_key(wallet.signer(), refunder_key_index)
+            .context("derive refunder secret key")?;
 
         let tx = refund_tx_from_witness_script(
             &witness_script,
             s.refund_lock_height,
             &funding,
-            &seller_receive,
-            &seller_secret_key,
+            &refunder_receive,
+            &refunder_secret_key,
             fee_sats,
         )
         .context("build refund tx")?;
