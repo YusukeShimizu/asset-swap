@@ -12,20 +12,42 @@ This repository's swap API is intentionally **gRPC-only**.
 - Validate inputs with Protovalidate where possible.
 - Document expected error codes and preconditions in `.proto` comments.
 
-## `SwapService`
+## `SwapService` (v1)
 
 The swap server implements `SwapService` and exposes it over gRPC.
 This single service expresses both buyer-side and seller-side actions.
 
+Protocol mapping:
+
+- `LN_TO_LIQUID` is a submarine swap (LN payment → Liquid HTLC claim).
+- `LIQUID_TO_LN` is a reverse submarine swap (Liquid HTLC funding → LN payment).
+
 Each RPC is intentionally small and single-purpose:
 
-- `CreateQuote`: create a quote snapshot (price/policy) for an `asset_id` and `asset_amount`.
+- `CreateQuote`: create a quote snapshot (price/policy) for an `asset_id`, `asset_amount`, and
+  `direction`.
 - `GetQuote`: fetch a quote by `quote_id`.
-- `CreateSwap`: create and fund the Liquid HTLC for a previously created quote.
-  - Returns a `Swap` containing the BOLT11 invoice and Liquid HTLC details.
+- `CreateSwap`: create a swap from a previously created quote.
+  - The request includes `buyer_liquid_address`.
+  - For `LIQUID_TO_LN`, the buyer also provides `buyer_bolt11_invoice`.
+  - Returns a `Swap` containing the BOLT11 invoice to be paid and Liquid HTLC details.
 - `GetSwap`: fetch swap status/details by `swap_id`.
 - `CreateLightningPayment`: pay the swap invoice and persist the preimage to the swap record.
-- `CreateAssetClaim`: claim the Liquid HTLC (asset acquisition) using the stored preimage and buyer signature.
+- `CreateAssetClaim`: claim the Liquid HTLC (asset acquisition) using the stored preimage and
+  claimer signature.
+
+Authentication and authorization:
+
+- Clients authenticate with a bearer token (`authorization: Bearer <token>`).
+- The server enforces minimal role-based access:
+  - Seller: `CreateQuote`
+  - Buyer: `CreateSwap`
+  - Buyer or seller: `GetQuote`, `GetSwap`
+- For swap execution actions:
+  - `CreateLightningPayment` is called by `Swap.parties.ln_payer`.
+  - `CreateAssetClaim` is called by `Swap.parties.liquid_claimer`.
+
+Note: The current `swap_server` implementation supports `LN_TO_LIQUID` (submarine swap) only.
 
 Server-side safety rules:
 

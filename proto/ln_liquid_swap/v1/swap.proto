@@ -5,63 +5,115 @@ package ln_liquid_swap.v1;
 import "buf/validate/validate.proto";
 import "google/api/field_behavior.proto";
 
-// LN→Liquid swap schema.
+// LN⇄Liquid swap schema.
 //
 // This API is intentionally gRPC-only (no HTTP JSON transcoding).
 //
+// Authentication:
+// - Clients MUST send an `authorization: Bearer <token>` metadata header.
+//
+// Authorization (minimal):
+// - Seller can create quotes.
+// - Buyer can create swaps from quotes.
+// - Swap execution actions depend on swap direction.
+//
 // Overview:
+// LN_TO_LIQUID:
+// - This is a "submarine swap".
 // - The seller locks a Liquid asset in a P2WSH HTLC (hashlock + CLTV).
 // - The seller creates a standard BOLT11 invoice whose payment hash matches the HTLC hashlock.
 // - The buyer pays the invoice, obtains the preimage, and claims the Liquid HTLC with:
 //   - the preimage, and
 //   - the buyer signature (so intermediaries cannot steal with preimage-only).
 //
+// LIQUID_TO_LN:
+// - This is a "reverse submarine swap".
+// - The buyer locks a Liquid asset in a P2WSH HTLC (hashlock + CLTV).
+// - The buyer creates a standard BOLT11 invoice whose payment hash matches the HTLC hashlock.
+// - The seller pays the invoice, obtains the preimage, and claims the Liquid HTLC with:
+//   - the preimage, and
+//   - the seller signature (so intermediaries cannot steal with preimage-only).
+//
 // Notes:
 // - This swap provides "practical atomicity", not full atomicity.
 // - HTLC outputs are explicit (unblinded) in this minimal design.
+// - The current reference implementation supports `SWAP_DIRECTION_LN_TO_LIQUID` only.
 service SwapService {
   // Creates a quote for a potential swap.
   //
-  // This RPC is used to discover the current price and policy parameters without funding an HTLC.
+  // Authorization: SELLER only.
+  //
+  // This RPC snapshots the current price and policy parameters without funding an HTLC.
   //
   // Errors:
+  // - `UNAUTHENTICATED` if authentication is missing/invalid.
+  // - `PERMISSION_DENIED` if the caller is not the seller.
   // - `INVALID_ARGUMENT` if the request is malformed or fails validation.
   // - `FAILED_PRECONDITION` if the seller does not support the given asset id.
   rpc CreateQuote(CreateQuoteRequest) returns (Quote);
 
   // Gets a quote by id.
   //
+  // Authorization: BUYER or SELLER.
+  //
   // Errors:
+  // - `UNAUTHENTICATED` if authentication is missing/invalid.
   // - `INVALID_ARGUMENT` if `quote_id` is malformed.
   // - `NOT_FOUND` if the quote does not exist.
   rpc GetQuote(GetQuoteRequest) returns (Quote);
 
   // Creates a new swap from a previously created quote.
   //
-  // Server behavior (minimal implementation):
+  // Authorization: BUYER only.
+  //
+  // Protocol mapping:
+  // - `LN_TO_LIQUID` is a submarine swap.
+  // - `LIQUID_TO_LN` is a reverse submarine swap.
+  //
+  // Server behavior (reference implementation):
   // - Resolves `quote_id` into a persisted quote.
   // - Rejects if the current offer differs from the quote.
+  // - Builds a Liquid HTLC witness script using:
+  //   - the invoice payment hash, and
+  //   - `buyer_liquid_address` (buyer key), and
+  //   - a seller key derived from server configuration.
   // - Funds the Liquid HTLC and broadcasts the funding transaction.
   // - Waits until the funding transaction has at least `min_funding_confs` confirmations.
-  // - Returns the BOLT11 invoice and the Liquid HTLC details.
+  // - Returns `Swap.bolt11_invoice` and the Liquid HTLC details.
+  //
+  // Notes:
+  // - The current reference implementation supports `LN_TO_LIQUID` only.
   //
   // Errors:
+  // - `UNAUTHENTICATED` if authentication is missing/invalid.
+  // - `PERMISSION_DENIED` if the caller is not the buyer.
   // - `INVALID_ARGUMENT` if the request is malformed or fails validation.
   // - `NOT_FOUND` if the quote does not exist.
+  // - `UNIMPLEMENTED` if the swap direction is not supported.
   // - `FAILED_PRECONDITION` if the offer changed since quoting, or if the seller cannot fund.
   // - `INTERNAL` for unexpected wallet / backend failures.
   rpc CreateSwap(CreateSwapRequest) returns (Swap);
 
   // Gets a swap by id.
   //
+  // Authorization: BUYER or SELLER.
+  //
   // Errors:
+  // - `UNAUTHENTICATED` if authentication is missing/invalid.
   // - `INVALID_ARGUMENT` if `swap_id` is malformed.
   // - `NOT_FOUND` if the swap does not exist.
   rpc GetSwap(GetSwapRequest) returns (Swap);
 
   // Creates a Lightning payment for a swap invoice and returns the payment result.
   //
+  // Authorization: `Swap.parties.ln_payer` only.
+  //
+  // - For `LN_TO_LIQUID`, the buyer pays the invoice.
+  // - For `LIQUID_TO_LN`, the seller pays the invoice.
+  //
   // Errors:
+  // - `UNAUTHENTICATED` if authentication is missing/invalid.
+  // - `PERMISSION_DENIED` if the caller is not the Lightning payer for this swap.
   // - `INVALID_ARGUMENT` if the request is malformed or fails validation.
   // - `NOT_FOUND` if the swap does not exist.
   // - `FAILED_PRECONDITION` if the swap is not funded.
@@ -70,7 +122,14 @@ service SwapService {
 
   // Creates an asset claim for a swap (Liquid HTLC spend).
   //
+  // Authorization: `Swap.parties.liquid_claimer` only.
+  //
+  // - For `LN_TO_LIQUID`, the buyer claims the Liquid HTLC.
+  // - For `LIQUID_TO_LN`, the seller claims the Liquid HTLC.
+  //
   // Errors:
+  // - `UNAUTHENTICATED` if authentication is missing/invalid.
+  // - `PERMISSION_DENIED` if the caller is not the Liquid claimer for this swap.
   // - `INVALID_ARGUMENT` if the request is malformed or fails validation.
   // - `NOT_FOUND` if the swap does not exist.
   // - `FAILED_PRECONDITION` if the swap has not been paid yet (missing preimage).
@@ -79,10 +138,19 @@ service SwapService {
 }
 
 message CreateQuoteRequest {
+  // The swap direction.
+  SwapDirection direction = 1 [
+    (google.api.field_behavior) = REQUIRED,
+    (buf.validate.field).enum = {
+      defined_only: true
+      not_in: [0]
+    }
+  ];
+
   // The asset id (32 bytes, hex-encoded).
   //
   // Current implementation supports exactly one sellable asset id.
-  string asset_id = 1 [
+  string asset_id = 2 [
     (google.api.field_behavior) = REQUIRED,
     (buf.validate.field).required = true,
     (buf.validate.field).string.len = 64,
@@ -92,7 +160,7 @@ message CreateQuoteRequest {
   // The amount of the asset to receive.
   //
   // Must be greater than 0.
-  uint64 asset_amount = 2 [(buf.validate.field).uint64.gt = 0];
+  uint64 asset_amount = 3 [(buf.validate.field).uint64.gt = 0];
 
   // The minimum required confirmations for the HTLC funding transaction.
   //
@@ -100,7 +168,7 @@ message CreateQuoteRequest {
   // Liquid backend (typically mempool).
   //
   // The server may reject excessively large values to avoid long-running requests.
-  uint32 min_funding_confs = 3 [(buf.validate.field).uint32.lte = 6];
+  uint32 min_funding_confs = 4 [(buf.validate.field).uint32.lte = 6];
 }
 
 message Quote {
@@ -127,22 +195,23 @@ message Quote {
   // The offer snapshot used to compute this quote.
   Offer offer = 3;
 
-  // The Liquid address that will receive the claimed outputs.
-  //
-  // This design expects a P2WPKH address (v0 witness program, 20 bytes).
-  string buyer_claim_address = 4;
+  // The swap direction.
+  SwapDirection direction = 4 [(buf.validate.field).enum = {defined_only: true}];
+
+  // Which party is responsible for each action.
+  SwapParties parties = 5;
 
   // The asset id being sold (hex-encoded).
-  string asset_id = 5;
+  string asset_id = 6;
 
   // The amount of the asset to receive.
-  uint64 asset_amount = 6;
+  uint64 asset_amount = 7;
 
   // The minimum required confirmations for the HTLC funding transaction.
-  uint32 min_funding_confs = 7;
+  uint32 min_funding_confs = 8;
 
   // The total price in millisatoshis.
-  uint64 total_price_msat = 8;
+  uint64 total_price_msat = 9;
 }
 
 message GetQuoteRequest {
@@ -165,26 +234,46 @@ message CreateSwapRequest {
     (buf.validate.field).string.max_len = 64,
     (buf.validate.field).string.pattern = "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
   ];
+
+  // A Liquid P2WPKH address controlled by the buyer.
+  //
+  // This address is used in the HTLC witness script:
+  // - For `LN_TO_LIQUID` (submarine swap), it becomes the claim key.
+  // - For `LIQUID_TO_LN` (reverse submarine swap), it becomes the refund key.
+  string buyer_liquid_address = 2 [
+    (google.api.field_behavior) = REQUIRED,
+    (buf.validate.field).required = true,
+    (buf.validate.field).string.min_len = 1
+  ];
+
+  // The buyer's BOLT11 invoice to be paid by the seller.
+  //
+  // Required for `LIQUID_TO_LN` (reverse submarine swap).
+  // Empty for `LN_TO_LIQUID` (submarine swap), where the server returns `Swap.bolt11_invoice`.
+  string buyer_bolt11_invoice = 3;
 }
 
 message Offer {
   // The asset id being sold (hex-encoded).
   string asset_id = 1;
 
+  // The swap directions supported by this offer.
+  repeated SwapDirection supported_directions = 2 [(buf.validate.field).repeated.min_items = 1];
+
   // The price in millisatoshis per 1 asset unit.
-  uint64 price_msat_per_asset_unit = 2;
+  uint64 price_msat_per_asset_unit = 3;
 
   // The LBTC amount the seller locks in the HTLC to subsidize claim/refund fees.
-  uint64 fee_subsidy_sats = 3;
+  uint64 fee_subsidy_sats = 4;
 
   // The relative refund timelock in blocks (used to compute `refund_lock_height`).
-  uint32 refund_delta_blocks = 4;
+  uint32 refund_delta_blocks = 5;
 
   // The invoice expiry used for swaps (seconds).
-  uint32 invoice_expiry_secs = 5;
+  uint32 invoice_expiry_secs = 6;
 
   // The maximum allowed `min_funding_confs` accepted by the server.
-  uint32 max_min_funding_confs = 6;
+  uint32 max_min_funding_confs = 7;
 }
 
 message GetSwapRequest {
@@ -260,20 +349,26 @@ message Swap {
   // The swap id. Use this value with `GetSwap`.
   string swap_id = 1;
 
-  // The Lightning invoice to be paid by the buyer.
-  string bolt11_invoice = 2;
+  // The quote id used to create this swap.
+  string quote_id = 2;
+
+  // The swap direction.
+  SwapDirection direction = 3 [(buf.validate.field).enum = {defined_only: true}];
+
+  // Which party is responsible for each action.
+  SwapParties parties = 4;
+
+  // The Lightning invoice to be paid by `Swap.parties.ln_payer`.
+  string bolt11_invoice = 5;
 
   // The invoice payment hash (hex-encoded, 32 bytes).
-  string payment_hash = 3;
+  string payment_hash = 6;
 
   // The current swap status.
-  SwapStatus status = 4;
+  SwapStatus status = 7;
 
   // Liquid-side HTLC details.
-  LiquidHtlc liquid = 5;
-
-  // The quote id used to create this swap.
-  string quote_id = 6;
+  LiquidHtlc liquid = 8;
 }
 
 message LiquidHtlc {
@@ -310,4 +405,37 @@ message LiquidHtlc {
 
   // The minimum required confirmations for the funding transaction.
   uint32 min_funding_confs = 10;
+}
+
+// SwapRole describes which party (buyer or seller) is responsible for a given action.
+enum SwapRole {
+  SWAP_ROLE_UNSPECIFIED = 0;
+  SWAP_ROLE_BUYER = 1;
+  SWAP_ROLE_SELLER = 2;
+}
+
+// SwapDirection describes which asset flow the swap represents.
+enum SwapDirection {
+  SWAP_DIRECTION_UNSPECIFIED = 0;
+  // Buyer pays over Lightning and receives a Liquid asset.
+  SWAP_DIRECTION_LN_TO_LIQUID = 1;
+  // Buyer pays a Liquid asset and receives over Lightning.
+  SWAP_DIRECTION_LIQUID_TO_LN = 2;
+}
+
+message SwapParties {
+  // Which party pays the Lightning invoice.
+  SwapRole ln_payer = 1;
+
+  // Which party receives the Lightning payment (invoice payee).
+  SwapRole ln_payee = 2;
+
+  // Which party funds the Liquid HTLC.
+  SwapRole liquid_funder = 3;
+
+  // Which party claims the Liquid HTLC using the preimage.
+  SwapRole liquid_claimer = 4;
+
+  // Which party refunds the Liquid HTLC after expiry.
+  SwapRole liquid_refunder = 5;
 }

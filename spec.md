@@ -1,6 +1,6 @@
-# LN→Liquid Swap Specification
+# LN⇄Liquid Swap Specification
 
-This repository is a minimal LN→Liquid swap implementation that combines LN (BOLT11) payments and
+This repository is a minimal LN⇄Liquid swap implementation that combines LN (BOLT11) payments and
 a Liquid HTLC (P2WSH).
 This document (`spec.md`) defines the required behavior and invariants for this repository.
 
@@ -72,31 +72,32 @@ operational principle
 ```text
 concept SwapCli
 purpose
-    Provide a CLI interface to operate the LN→Liquid swap.
+    Provide a CLI interface to operate the LN⇄Liquid swap.
     The CLI calls the gRPC server.
 state
     grpc_url: string
+    auth_token: string
 actions
-    create_quote [ asset_id: string; asset_amount: uint64; min_funding_confs: uint32 ]
+    create_quote [ auth_token: string; direction: string; asset_id: string; asset_amount: uint64; min_funding_confs: uint32 ]
         => [ quote_id: string; offer_id: string; total_price_msat: uint64 ]
-    get_quote [ quote_id: string ]
+    get_quote [ auth_token: string; quote_id: string ]
         => [ quote_id: string; offer_id: string; total_price_msat: uint64 ]
-    create_swap [ quote_id: string ]
+    create_swap [ auth_token: string; quote_id: string; buyer_liquid_address: string; buyer_bolt11_invoice: string ]
         => [ swap_id: string; bolt11_invoice: string; payment_hash: string ]
-    get_swap [ swap_id: string ]
+    get_swap [ auth_token: string; swap_id: string ]
         => [ swap_id: string; status: string ]
-    create_lightning_payment [ swap_id: string ]
+    create_lightning_payment [ auth_token: string; swap_id: string ]
         => [ payment_id: string; preimage_hex: string ]
-    create_asset_claim [ swap_id: string ]
+    create_asset_claim [ auth_token: string; swap_id: string ]
         => [ claim_txid: string ]
 operational principle
-    after create_quote [ asset_id: "<ASSET_ID>"; asset_amount: 1000; min_funding_confs: 1 ]
+    after create_quote [ auth_token: "<SELLER_TOKEN>"; direction: "LN_TO_LIQUID"; asset_id: "<ASSET_ID>"; asset_amount: 1000; min_funding_confs: 1 ]
         => [ quote_id: "<UUID>"; total_price_msat: 1000000 ]
-    then create_swap [ quote_id: "<UUID>" ]
+    then create_swap [ auth_token: "<BUYER_TOKEN>"; quote_id: "<UUID>"; buyer_liquid_address: "<BUYER_LIQUID_ADDRESS>"; buyer_bolt11_invoice: "" ]
         => [ swap_id: "<UUID>" ]
-    then create_lightning_payment [ swap_id: "<UUID>" ]
+    then create_lightning_payment [ auth_token: "<BUYER_TOKEN>"; swap_id: "<UUID>" ]
         => [ payment_id: "<UUID>" ]
-    then create_asset_claim [ swap_id: "<UUID>" ]
+    then create_asset_claim [ auth_token: "<BUYER_TOKEN>"; swap_id: "<UUID>" ]
         => [ claim_txid: "<TXID>" ]
 ```
 
@@ -105,47 +106,70 @@ concept LnLiquidSwap
 purpose
     Provide a swap that combines LN invoice payments and a Liquid HTLC (P2WSH).
     This implementation does not provide full atomicity.
+    Expose two directions in the API: LN_TO_LIQUID and LIQUID_TO_LN.
+    LN_TO_LIQUID is a submarine swap.
+    LIQUID_TO_LN is a reverse submarine swap.
+    Current implementation supports LN_TO_LIQUID only.
+    Require authentication and authorization via bearer token.
+    Seller can create quotes.
+    Buyer can create swaps from quotes.
+    Swap execution actions depend on swap direction.
     Buyer and seller actions are represented as a single gRPC server (a single Protobuf service).
     In this minimal setup, the buyer and seller may share the same LN node and Liquid wallet.
 state
     proto_file: string
+    seller_token: string
+    buyer_token: string
 actions
-    create_quote [ asset_id: string; asset_amount: uint64; min_funding_confs: uint32 ]
+    create_quote [ auth_token: string; direction: string; asset_id: string; asset_amount: uint64; min_funding_confs: uint32 ]
         => [ quote_id: string; offer_id: string; total_price_msat: uint64 ]
+        server MUST reject if `auth_token` is not `seller_token`
+        server MUST reject if `direction` is not supported by the current offer
         seller MUST compute `total_price_msat = asset_amount * price_msat_per_asset_unit`
         seller MUST persist the quote so it can be resolved by `quote_id`
-    get_quote [ quote_id: string ]
+    get_quote [ auth_token: string; quote_id: string ]
         => [ found: boolean ]
-    create_swap [ quote_id: string ]
+        server MUST reject if `auth_token` is not `buyer_token` and not `seller_token`
+    create_swap [ auth_token: string; quote_id: string; buyer_liquid_address: string; buyer_bolt11_invoice: string ]
         => [ swap_id: string; bolt11_invoice: string; payment_hash: string; funding_txid: string; p2wsh_address: string ]
+        server MUST reject if `auth_token` is not `buyer_token`
         seller MUST resolve `quote_id` to a persisted quote
         seller MUST reject if the current offer differs from the quote (`offer_id` mismatch)
-        seller MUST lock the asset output and the LBTC fee subsidy output into the same P2WSH HTLC
+        server MUST set swap direction from the quote direction
+        server MUST set swap parties from the swap direction
+        server MUST lock the asset output and the LBTC fee subsidy output into the same P2WSH HTLC
         HTLC outputs MUST be explicit (unblinded) in this minimal design
-        seller MUST fund the Liquid HTLC before returning `bolt11_invoice`
-        seller MUST set invoice amount to `Quote.total_price_msat`
-    get_swap [ swap_id: string ]
+        server MUST build the HTLC witness script so that:
+            - claim path requires `Swap.parties.liquid_claimer` signature, and
+            - refund path requires `Swap.parties.liquid_refunder` signature.
+        server MUST fund the Liquid HTLC before returning `bolt11_invoice`
+        server MUST create a BOLT11 invoice for `Swap.parties.ln_payee`
+        server MUST set invoice amount to `Quote.total_price_msat`
+    get_swap [ auth_token: string; swap_id: string ]
         => [ found: boolean ]
-    create_lightning_payment [ swap_id: string ]
+        server MUST reject if `auth_token` is not `buyer_token` and not `seller_token`
+    create_lightning_payment [ auth_token: string; swap_id: string ]
         => [ payment_id: string ]
-        buyer MUST pay `Swap.bolt11_invoice` via the configured LN node
-        buyer MUST verify `SHA256(preimage) == Swap.payment_hash` before persisting the payment result
-    create_asset_claim [ swap_id: string ]
+        server MUST reject if `auth_token` is not the token for `Swap.parties.ln_payer`
+        ln_payer MUST pay `Swap.bolt11_invoice` via the configured LN node
+        ln_payer MUST verify `SHA256(preimage) == Swap.payment_hash` before persisting the payment result
+    create_asset_claim [ auth_token: string; swap_id: string ]
         => [ claim_txid: string ]
-        buyer MUST build a claim tx that spends the HTLC with:
+        server MUST reject if `auth_token` is not the token for `Swap.parties.liquid_claimer`
+        liquid_claimer MUST build a claim tx that spends the HTLC with:
             - the preimage, and
-            - the buyer signature (preimage-only spend MUST NOT be allowed)
-        buyer MUST broadcast the claim tx on Liquid
+            - the liquid_claimer signature (preimage-only spend MUST NOT be allowed)
+        liquid_claimer MUST broadcast the claim tx on Liquid
 operational principle
-    after create_quote [ asset_id: "<ASSET_ID>"; asset_amount: 1000; min_funding_confs: 1 ]
+    after create_quote [ auth_token: "<SELLER_TOKEN>"; direction: "LN_TO_LIQUID"; asset_id: "<ASSET_ID>"; asset_amount: 1000; min_funding_confs: 1 ]
         => [ quote_id: "<UUID>"; total_price_msat: 1000000 ]
-    then create_swap [ quote_id: "<UUID>" ]
+    then create_swap [ auth_token: "<BUYER_TOKEN>"; quote_id: "<UUID>"; buyer_liquid_address: "<BUYER_LIQUID_ADDRESS>"; buyer_bolt11_invoice: "" ]
         => [ swap_id: "<UUID>" ]
-    then create_lightning_payment [ swap_id: "<UUID>" ]
+    then create_lightning_payment [ auth_token: "<BUYER_TOKEN>"; swap_id: "<UUID>" ]
         => [ payment_id: "<UUID>" ]
-    then create_asset_claim [ swap_id: "<UUID>" ]
+    then create_asset_claim [ auth_token: "<BUYER_TOKEN>"; swap_id: "<UUID>" ]
         => [ claim_txid: "<TXID>" ]
-    then get_swap [ swap_id: "<UUID>" ]
+    then get_swap [ auth_token: "<BUYER_TOKEN>"; swap_id: "<UUID>" ]
         => [ found: true ]
 ```
 
@@ -164,8 +188,8 @@ actions
         => [ witness_script: bytes; p2wsh_address: string ]
         witness_script MUST use `OP_SHA256` for hashlock
         witness_script MUST use `OP_CHECKLOCKTIMEVERIFY` for timelock (CLTV)
-        claim path MUST require buyer signature (preimage-only spend MUST NOT be allowed)
-        refund path MUST require seller signature and CLTV
+        claim path MUST require liquid_claimer signature (preimage-only spend MUST NOT be allowed)
+        refund path MUST require liquid_refunder signature and CLTV
 operational principle
     after build [ payment_hash: "<HASH>"; buyer_pubkey_hash160: "<PKH>"; seller_pubkey_hash160: "<PKH>"; refund_lock_height: 1000 ]
         => [ p2wsh_address: "<ADDR>" ]

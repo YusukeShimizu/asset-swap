@@ -14,6 +14,8 @@ use ldk_server_protos::api::{
 };
 use ldk_server_protos::types::{PaymentDirection, PaymentStatus, payment_kind};
 use lwk_wollet::ElementsNetwork;
+use tonic::Request;
+use tonic::metadata::MetadataValue;
 use tonic::transport::Server;
 
 use support::bitcoind::BitcoindProcess;
@@ -31,6 +33,7 @@ use ln_liquid_swap::proto::v1::swap_service_client::SwapServiceClient;
 use ln_liquid_swap::proto::v1::swap_service_server::SwapServiceServer;
 use ln_liquid_swap::proto::v1::{
     CreateAssetClaimRequest, CreateLightningPaymentRequest, CreateQuoteRequest, CreateSwapRequest,
+    SwapDirection,
 };
 use ln_liquid_swap::swap::service::{SwapServiceConfig, SwapServiceImpl};
 use ln_liquid_swap::swap::store::SqliteStore;
@@ -277,8 +280,6 @@ async fn ln_to_liquid_swap_create_pay_claim() -> Result<()> {
         .sync()
         .context("sync seller after receiving asset")?;
 
-    let buyer_receive = seller_wallet.address_at(1).context("get buyer address")?;
-
     // --- Swap gRPC server (seller LN = bob, buyer LN = alice) ---
     let store_path = seller_dir.path().join("store.sqlite3");
     let store = SqliteStore::open(store_path).context("create sqlite store")?;
@@ -293,6 +294,8 @@ async fn ln_to_liquid_swap_create_pay_claim() -> Result<()> {
         invoice_expiry_secs: 3600,
         seller_key_index: 0,
         buyer_key_index: 1,
+        seller_token: "seller-token".to_string(),
+        buyer_token: "buyer-token".to_string(),
     };
     let ln = LdkLightningClient::new(alice.rest_service_address().to_string());
     let svc = SwapServiceImpl::new(cfg, ln, wallet.clone(), store);
@@ -316,23 +319,34 @@ async fn ln_to_liquid_swap_create_pay_claim() -> Result<()> {
 
     let asset_amount = 1_000u64;
     let quote = swap_client
-        .create_quote(CreateQuoteRequest {
-            asset_id: asset_id.to_string(),
-            asset_amount,
-            min_funding_confs: 1,
-        })
+        .create_quote(with_auth(
+            "seller-token",
+            CreateQuoteRequest {
+                direction: SwapDirection::LnToLiquid as i32,
+                asset_id: asset_id.to_string(),
+                asset_amount,
+                min_funding_confs: 1,
+            },
+        ))
         .await
         .context("CreateQuote")?
         .into_inner();
-    anyhow::ensure!(
-        quote.buyer_claim_address == buyer_receive.to_string(),
-        "buyer_claim_address mismatch"
-    );
+    let buyer_liquid_address = wallet
+        .lock()
+        .expect("wallet mutex poisoned")
+        .address_at(1)
+        .context("get buyer liquid address")?
+        .to_string();
 
     let swap = {
-        let mut create_fut = Box::pin(swap_client.create_swap(CreateSwapRequest {
-            quote_id: quote.quote_id.clone(),
-        }));
+        let mut create_fut = Box::pin(swap_client.create_swap(with_auth(
+            "buyer-token",
+            CreateSwapRequest {
+                quote_id: quote.quote_id.clone(),
+                buyer_liquid_address,
+                buyer_bolt11_invoice: String::new(),
+            },
+        )));
 
         let create_deadline = Instant::now() + Duration::from_secs(60);
         let mut mine_interval = tokio::time::interval(Duration::from_secs(1));
@@ -362,10 +376,13 @@ async fn ln_to_liquid_swap_create_pay_claim() -> Result<()> {
     anyhow::ensure!(invoice_hash == resp_hash, "payment_hash mismatch");
 
     let pay_resp = swap_client
-        .create_lightning_payment(CreateLightningPaymentRequest {
-            swap_id: swap.swap_id.clone(),
-            payment_timeout_secs: 60,
-        })
+        .create_lightning_payment(with_auth(
+            "buyer-token",
+            CreateLightningPaymentRequest {
+                swap_id: swap.swap_id.clone(),
+                payment_timeout_secs: 60,
+            },
+        ))
         .await
         .context("CreateLightningPayment")?
         .into_inner();
@@ -377,10 +394,13 @@ async fn ln_to_liquid_swap_create_pay_claim() -> Result<()> {
     anyhow::ensure!(sha256_preimage(&preimage) == resp_hash, "preimage mismatch");
 
     let claim_resp = swap_client
-        .create_asset_claim(CreateAssetClaimRequest {
-            swap_id: swap.swap_id.clone(),
-            claim_fee_sats: 500,
-        })
+        .create_asset_claim(with_auth(
+            "buyer-token",
+            CreateAssetClaimRequest {
+                swap_id: swap.swap_id.clone(),
+                claim_fee_sats: 500,
+            },
+        ))
         .await
         .context("CreateAssetClaim")?
         .into_inner();
@@ -425,4 +445,13 @@ async fn ln_to_liquid_swap_create_pay_claim() -> Result<()> {
 
     tracing::info!(%claim_txid, "swap e2e completed");
     Ok(())
+}
+
+fn with_auth<T>(token: &str, msg: T) -> Request<T> {
+    let mut req = Request::new(msg);
+    let header_value = format!("Bearer {token}");
+    let meta =
+        MetadataValue::try_from(header_value).expect("authorization metadata must be valid ASCII");
+    req.metadata_mut().insert("authorization", meta);
+    req
 }

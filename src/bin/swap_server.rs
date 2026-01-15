@@ -66,6 +66,12 @@ struct Args {
 
     #[arg(long, default_value_t = 500)]
     refund_fee_sats: u64,
+
+    #[arg(long)]
+    seller_token: String,
+
+    #[arg(long)]
+    buyer_token: String,
 }
 
 #[tokio::main]
@@ -74,6 +80,19 @@ async fn main() -> Result<()> {
 
     let args = Args::parse();
     let listen_addr: SocketAddr = args.listen_addr.parse().context("parse listen_addr")?;
+
+    anyhow::ensure!(
+        !args.seller_token.trim().is_empty(),
+        "seller_token must not be empty"
+    );
+    anyhow::ensure!(
+        !args.buyer_token.trim().is_empty(),
+        "buyer_token must not be empty"
+    );
+    anyhow::ensure!(
+        args.seller_token != args.buyer_token,
+        "seller_token and buyer_token must be different"
+    );
 
     std::fs::create_dir_all(&args.wallet_dir).context("create wallet_dir")?;
     if let Some(parent) = args.store_path.parent() {
@@ -124,6 +143,8 @@ async fn main() -> Result<()> {
         invoice_expiry_secs: args.invoice_expiry_secs,
         seller_key_index: args.seller_key_index,
         buyer_key_index: args.buyer_key_index,
+        seller_token: args.seller_token,
+        buyer_token: args.buyer_token,
     };
 
     let ln = LdkLightningClient::new(args.ldk_rest_addr);

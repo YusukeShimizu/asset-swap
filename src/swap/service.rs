@@ -25,6 +25,35 @@ const MAX_MIN_FUNDING_CONFS: u32 = 6;
 const DEFAULT_PAYMENT_TIMEOUT_SECS: u64 = 60;
 const DEFAULT_CLAIM_FEE_SATS: u64 = 500;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CallerRole {
+    Buyer,
+    Seller,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AuthError {
+    MissingBearerToken,
+    InvalidBearerToken,
+    SellerRoleRequired,
+    BuyerRoleRequired,
+    SwapRoleRequired(&'static str),
+}
+
+impl From<AuthError> for Status {
+    fn from(value: AuthError) -> Self {
+        match value {
+            AuthError::MissingBearerToken => Status::unauthenticated("missing bearer token"),
+            AuthError::InvalidBearerToken => Status::unauthenticated("invalid bearer token"),
+            AuthError::SellerRoleRequired => Status::permission_denied("seller role required"),
+            AuthError::BuyerRoleRequired => Status::permission_denied("buyer role required"),
+            AuthError::SwapRoleRequired(what) => {
+                Status::permission_denied(format!("{what} role required"))
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct SwapServiceConfig {
     pub sell_asset_id: AssetId,
@@ -34,6 +63,8 @@ pub struct SwapServiceConfig {
     pub invoice_expiry_secs: u32,
     pub seller_key_index: u32,
     pub buyer_key_index: u32,
+    pub seller_token: String,
+    pub buyer_token: String,
 }
 
 #[derive(Clone)]
@@ -60,8 +91,10 @@ impl SwapServiceImpl {
     }
 
     fn current_offer(&self) -> pb::Offer {
+        let supported_directions = vec![pb::SwapDirection::LnToLiquid as i32];
         pb::Offer {
             asset_id: self.cfg.sell_asset_id.to_string(),
+            supported_directions,
             price_msat_per_asset_unit: self.cfg.price_msat_per_asset_unit,
             fee_subsidy_sats: self.cfg.fee_subsidy_sats,
             refund_delta_blocks: self.cfg.refund_delta_blocks,
@@ -79,22 +112,101 @@ impl SwapServiceImpl {
     }
 
     fn quote_record_to_proto(record: &QuoteRecord) -> pb::Quote {
+        let direction = pb::SwapDirection::LnToLiquid;
         pb::Quote {
             quote_id: record.quote_id.clone(),
             offer_id: record.offer_id.clone(),
             offer: Some(pb::Offer {
                 asset_id: record.asset_id.clone(),
+                supported_directions: vec![direction as i32],
                 price_msat_per_asset_unit: record.price_msat_per_asset_unit,
                 fee_subsidy_sats: record.fee_subsidy_sats,
                 refund_delta_blocks: record.refund_delta_blocks,
                 invoice_expiry_secs: record.invoice_expiry_secs,
                 max_min_funding_confs: record.max_min_funding_confs,
             }),
-            buyer_claim_address: record.buyer_claim_address.clone(),
+            direction: direction as i32,
+            parties: Some(Self::parties_for_direction(direction)),
             asset_id: record.asset_id.clone(),
             asset_amount: record.asset_amount,
             min_funding_confs: record.min_funding_confs,
             total_price_msat: record.total_price_msat,
+        }
+    }
+
+    fn authorization_bearer_token(metadata: &tonic::metadata::MetadataMap) -> Option<&str> {
+        let header = metadata.get("authorization")?.to_str().ok()?;
+        header.strip_prefix("Bearer ")
+    }
+
+    fn require_authenticated<T>(&self, request: &Request<T>) -> Result<CallerRole, AuthError> {
+        let token = Self::authorization_bearer_token(request.metadata())
+            .ok_or(AuthError::MissingBearerToken)?;
+
+        if token == self.cfg.seller_token {
+            return Ok(CallerRole::Seller);
+        }
+        if token == self.cfg.buyer_token {
+            return Ok(CallerRole::Buyer);
+        }
+
+        Err(AuthError::InvalidBearerToken)
+    }
+
+    fn require_seller<T>(&self, request: &Request<T>) -> Result<(), AuthError> {
+        let role = self.require_authenticated(request)?;
+        if role != CallerRole::Seller {
+            return Err(AuthError::SellerRoleRequired);
+        }
+        Ok(())
+    }
+
+    fn require_buyer<T>(&self, request: &Request<T>) -> Result<(), AuthError> {
+        let role = self.require_authenticated(request)?;
+        if role != CallerRole::Buyer {
+            return Err(AuthError::BuyerRoleRequired);
+        }
+        Ok(())
+    }
+
+    fn parties_for_direction(direction: pb::SwapDirection) -> pb::SwapParties {
+        match direction {
+            pb::SwapDirection::LnToLiquid => pb::SwapParties {
+                ln_payer: pb::SwapRole::Buyer as i32,
+                ln_payee: pb::SwapRole::Seller as i32,
+                liquid_funder: pb::SwapRole::Seller as i32,
+                liquid_claimer: pb::SwapRole::Buyer as i32,
+                liquid_refunder: pb::SwapRole::Seller as i32,
+            },
+            pb::SwapDirection::LiquidToLn => pb::SwapParties {
+                ln_payer: pb::SwapRole::Seller as i32,
+                ln_payee: pb::SwapRole::Buyer as i32,
+                liquid_funder: pb::SwapRole::Buyer as i32,
+                liquid_claimer: pb::SwapRole::Seller as i32,
+                liquid_refunder: pb::SwapRole::Buyer as i32,
+            },
+            pb::SwapDirection::Unspecified => pb::SwapParties {
+                ln_payer: pb::SwapRole::Unspecified as i32,
+                ln_payee: pb::SwapRole::Unspecified as i32,
+                liquid_funder: pb::SwapRole::Unspecified as i32,
+                liquid_claimer: pb::SwapRole::Unspecified as i32,
+                liquid_refunder: pb::SwapRole::Unspecified as i32,
+            },
+        }
+    }
+
+    fn require_swap_role(
+        caller: CallerRole,
+        required: pb::SwapRole,
+        what: &'static str,
+    ) -> Result<(), AuthError> {
+        if matches!(
+            (caller, required),
+            (CallerRole::Buyer, pb::SwapRole::Buyer) | (CallerRole::Seller, pb::SwapRole::Seller)
+        ) {
+            Ok(())
+        } else {
+            Err(AuthError::SwapRoleRequired(what))
         }
     }
 
@@ -111,8 +223,11 @@ impl SwapServiceImpl {
         let witness_script =
             hex::decode(&record.witness_script_hex).context("decode witness_script_hex")?;
 
+        let direction = pb::SwapDirection::LnToLiquid;
         Ok(pb::Swap {
             swap_id: record.swap_id.clone(),
+            direction: direction as i32,
+            parties: Some(Self::parties_for_direction(direction)),
             bolt11_invoice: record.bolt11_invoice.clone(),
             payment_hash: record.payment_hash.clone(),
             status,
@@ -173,7 +288,14 @@ impl pb::swap_service_server::SwapService for SwapServiceImpl {
         &self,
         request: Request<pb::CreateQuoteRequest>,
     ) -> Result<Response<pb::Quote>, Status> {
+        self.require_seller(&request).map_err(Status::from)?;
         let req = request.into_inner();
+
+        let direction = pb::SwapDirection::try_from(req.direction)
+            .map_err(|_| Status::invalid_argument("direction must be a valid SwapDirection"))?;
+        if direction == pb::SwapDirection::Unspecified {
+            return Err(Status::invalid_argument("direction is required"));
+        }
 
         let asset_amount = req.asset_amount;
         if asset_amount == 0 {
@@ -201,6 +323,10 @@ impl pb::swap_service_server::SwapService for SwapServiceImpl {
             .map_err(|e| Status::internal(format!("get buyer claim address: {e:#}")))?;
 
         let offer = self.current_offer();
+        if !offer.supported_directions.contains(&(direction as i32)) {
+            return Err(Status::failed_precondition("unsupported direction"));
+        }
+
         let offer_id = Self::offer_id(&offer);
         let total_price_msat = asset_amount
             .checked_mul(offer.price_msat_per_asset_unit)
@@ -236,6 +362,7 @@ impl pb::swap_service_server::SwapService for SwapServiceImpl {
         &self,
         request: Request<pb::GetQuoteRequest>,
     ) -> Result<Response<pb::Quote>, Status> {
+        let _caller = self.require_authenticated(&request).map_err(Status::from)?;
         let req = request.into_inner();
         if req.quote_id.trim().is_empty() {
             return Err(Status::invalid_argument("quote_id is required"));
@@ -256,9 +383,18 @@ impl pb::swap_service_server::SwapService for SwapServiceImpl {
         &self,
         request: Request<pb::CreateSwapRequest>,
     ) -> Result<Response<pb::Swap>, Status> {
+        self.require_buyer(&request).map_err(Status::from)?;
         let req = request.into_inner();
         if req.quote_id.trim().is_empty() {
             return Err(Status::invalid_argument("quote_id is required"));
+        }
+        if req.buyer_liquid_address.trim().is_empty() {
+            return Err(Status::invalid_argument("buyer_liquid_address is required"));
+        }
+        if !req.buyer_bolt11_invoice.trim().is_empty() {
+            return Err(Status::unimplemented(
+                "reverse submarine swap (buyer_bolt11_invoice) is not implemented",
+            ));
         }
 
         let quote = self
@@ -296,8 +432,8 @@ impl pb::swap_service_server::SwapService for SwapServiceImpl {
             return Err(Status::failed_precondition("unsupported asset_id"));
         }
 
-        let buyer_claim_address = Address::from_str(&quote.buyer_claim_address)
-            .map_err(|e| Status::invalid_argument(format!("invalid buyer_claim_address: {e}")))?;
+        let buyer_claim_address = Address::from_str(&req.buyer_liquid_address)
+            .map_err(|e| Status::invalid_argument(format!("invalid buyer_liquid_address: {e}")))?;
 
         let min_funding_confs = quote.min_funding_confs;
         if min_funding_confs > MAX_MIN_FUNDING_CONFS {
@@ -309,7 +445,7 @@ impl pb::swap_service_server::SwapService for SwapServiceImpl {
         let buyer_pubkey_hash160 = pubkey_hash160_from_p2wpkh_address(&buyer_claim_address)
             .map_err(|e| {
                 Status::invalid_argument(format!(
-                    "buyer_claim_address must be a P2WPKH address: {e}"
+                    "buyer_liquid_address must be a P2WPKH address: {e}"
                 ))
             })?;
 
@@ -321,7 +457,7 @@ impl pb::swap_service_server::SwapService for SwapServiceImpl {
             .address_params();
         if buyer_claim_address.params != params {
             return Err(Status::invalid_argument(
-                "buyer_claim_address network mismatch",
+                "buyer_liquid_address network mismatch",
             ));
         }
 
@@ -442,6 +578,7 @@ impl pb::swap_service_server::SwapService for SwapServiceImpl {
         &self,
         request: Request<pb::GetSwapRequest>,
     ) -> Result<Response<pb::Swap>, Status> {
+        let _caller = self.require_authenticated(&request).map_err(Status::from)?;
         let req = request.into_inner();
         if req.swap_id.trim().is_empty() {
             return Err(Status::invalid_argument("swap_id is required"));
@@ -464,6 +601,7 @@ impl pb::swap_service_server::SwapService for SwapServiceImpl {
         &self,
         request: Request<pb::CreateLightningPaymentRequest>,
     ) -> Result<Response<pb::LightningPayment>, Status> {
+        let caller = self.require_authenticated(&request).map_err(Status::from)?;
         let req = request.into_inner();
         if req.swap_id.trim().is_empty() {
             return Err(Status::invalid_argument("swap_id is required"));
@@ -476,6 +614,12 @@ impl pb::swap_service_server::SwapService for SwapServiceImpl {
             .get_swap(&req.swap_id)
             .map_err(|e| Status::internal(format!("get swap: {e:#}")))?
             .ok_or_else(|| Status::not_found("swap not found"))?;
+
+        let direction = pb::SwapDirection::LnToLiquid;
+        let parties = Self::parties_for_direction(direction);
+        let ln_payer =
+            pb::SwapRole::try_from(parties.ln_payer).unwrap_or(pb::SwapRole::Unspecified);
+        Self::require_swap_role(caller, ln_payer, "ln_payer").map_err(Status::from)?;
 
         if let (Some(payment_id), Some(preimage_hex)) =
             (record.ln_payment_id.clone(), record.ln_preimage_hex.clone())
@@ -542,6 +686,7 @@ impl pb::swap_service_server::SwapService for SwapServiceImpl {
         &self,
         request: Request<pb::CreateAssetClaimRequest>,
     ) -> Result<Response<pb::AssetClaim>, Status> {
+        let caller = self.require_authenticated(&request).map_err(Status::from)?;
         let req = request.into_inner();
         if req.swap_id.trim().is_empty() {
             return Err(Status::invalid_argument("swap_id is required"));
@@ -554,6 +699,12 @@ impl pb::swap_service_server::SwapService for SwapServiceImpl {
             .get_swap(&req.swap_id)
             .map_err(|e| Status::internal(format!("get swap: {e:#}")))?
             .ok_or_else(|| Status::not_found("swap not found"))?;
+
+        let direction = pb::SwapDirection::LnToLiquid;
+        let parties = Self::parties_for_direction(direction);
+        let liquid_claimer =
+            pb::SwapRole::try_from(parties.liquid_claimer).unwrap_or(pb::SwapRole::Unspecified);
+        Self::require_swap_role(caller, liquid_claimer, "liquid_claimer").map_err(Status::from)?;
 
         if let Some(claim_txid) = record.claim_txid.clone() {
             return Ok(Response::new(pb::AssetClaim { claim_txid }));

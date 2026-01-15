@@ -1,11 +1,10 @@
 ---
-title: LN→Liquid Swap (gRPC)
-description: How to create a swap, pay over Lightning, and claim a Liquid HTLC.
+title: LN⇄Liquid Swap (gRPC)
+description: Bidirectional swap between Lightning and a Liquid HTLC.
 ---
 
-This repository includes a minimal LN→Liquid swap implementation over gRPC.
-It allows a buyer to pay a Lightning invoice and (practically) atomically receive a Liquid asset
-locked in a P2WSH HTLC (hashlock + CLTV).
+This repository includes a minimal LN⇄Liquid swap implementation over gRPC.
+It combines Lightning payments (BOLT11) and a Liquid HTLC (P2WSH) in two directions.
 
 This page is the API-oriented overview.
 For a regtest runbook (including issuing an asset as RWA and selling it), see
@@ -13,18 +12,23 @@ For a regtest runbook (including issuing an asset as RWA and selling it), see
 
 ## What This API Does
 
-- Seller funds a Liquid HTLC output with the asset and an LBTC fee subsidy.
-- Seller returns a BOLT11 invoice whose payment hash matches the HTLC hashlock.
-- Buyer pays the invoice, obtains the preimage, and spends the HTLC to claim the asset.
+- `LN_TO_LIQUID` (submarine swap):
+  - Seller funds a Liquid HTLC output with the asset and an LBTC fee subsidy.
+  - Seller returns a BOLT11 invoice whose payment hash matches the HTLC hashlock.
+  - Buyer pays the invoice, obtains the preimage, and spends the HTLC to claim the asset.
+- `LIQUID_TO_LN` (reverse submarine swap):
+  - Buyer funds a Liquid HTLC output with the asset and an LBTC fee subsidy.
+  - Buyer returns a BOLT11 invoice whose payment hash matches the HTLC hashlock.
+  - Seller pays the invoice, obtains the preimage, and spends the HTLC to claim the asset.
 
 This is a minimal design and is not production-ready.
 
 ## Assumptions (Read First)
 
 - The external API is **gRPC only** (no HTTP JSON).
-- gRPC runs in **plaintext** and there is **no authentication/authorization**.
+- gRPC runs in **plaintext** by default.
+  - The API uses a bearer token (`authorization: Bearer <token>`) and MUST be protected by TLS or a private network boundary.
   - Do not expose the service to the public internet.
-  - Protect it with network-level controls (private network / firewall) if used outside regtest.
 - This minimal server uses a single LN node for both invoice creation and payment.
   - Depending on the LN backend, paying your own invoice may not be supported.
 - HTLC outputs are **explicit (unblinded)** for simplicity.
@@ -43,7 +47,7 @@ This is a minimal design and is not production-ready.
 ## Pricing Model (Simplest)
 
 - The seller decides the price by configuration (`--price-msat-per-asset-unit`).
-- The buyer creates a quote via `CreateQuote`.
+- The seller creates a quote via `CreateQuote` and shares `quote_id` with the buyer.
   - The server computes `total_price_msat = asset_amount * price_msat_per_asset_unit`.
 - The buyer creates a swap via `CreateSwap(quote_id)`.
   - The server rejects if the current offer differs from the quoted offer (`offer_id` mismatch).
@@ -62,12 +66,26 @@ This is a minimal design and is not production-ready.
 The Protobuf schema is at `proto/ln_liquid_swap/v1/swap.proto`.
 The Protobuf package name is `ln_liquid_swap.v1`.
 
+### Authentication and Roles
+
+All RPCs require an `authorization: Bearer <token>` gRPC metadata header.
+
+- **Seller token** can call `CreateQuote`.
+- **Buyer token** can call `CreateSwap`.
+- Both tokens can call `GetQuote` and `GetSwap`.
+
+For swap execution:
+
+- `Swap.parties` indicates which role must call `CreateLightningPayment` and `CreateAssetClaim`.
+- `Swap.direction` determines the `Swap.parties` mapping.
+
 ### `CreateQuote`
 
 Creates a quote (pricing snapshot) for a potential swap.
 
 The client sends a `CreateQuoteRequest`:
 
+- `direction`: `LN_TO_LIQUID` or `LIQUID_TO_LN`.
 - `asset_id`: 32-byte asset id, hex-encoded (64 hex chars).
 - `asset_amount`: amount of the asset to receive (must be > 0).
 - `min_funding_confs`: required confirmations for the funding transaction (0–6).
@@ -78,6 +96,7 @@ The server returns a `Quote` containing:
 - `offer_id`: offer snapshot id (SHA256 hex, 32 bytes).
 - `total_price_msat`: total invoice amount to be paid.
 - `offer`: the offer snapshot (price and policy parameters).
+- `direction` and `parties`: direction and role responsibilities for this swap.
 
 ### `GetQuote`
 
@@ -88,11 +107,16 @@ Fetches a quote by `quote_id`.
 The client sends a `CreateSwapRequest`:
 
 - `quote_id`: UUID string returned by `CreateQuote`.
+- `buyer_liquid_address`: buyer-controlled Liquid P2WPKH address.
+  - For `LN_TO_LIQUID` (submarine swap), used as the claim key.
+  - For `LIQUID_TO_LN` (reverse submarine swap), used as the refund key.
+- `buyer_bolt11_invoice`: buyer-created invoice to be paid by the seller (required for `LIQUID_TO_LN`).
 
 The server returns a `Swap` containing:
 
 - `bolt11_invoice`: the Lightning invoice to pay.
 - `payment_hash`: hex-encoded payment hash (must match the invoice and the HTLC witness script).
+- `direction` and `parties`: direction and role responsibilities for this swap.
 - `liquid`: HTLC details:
   - `witness_script` (bytes),
   - `p2wsh_address`,
@@ -110,6 +134,8 @@ Error handling notes:
 
 Pays the swap invoice on Lightning.
 
+This RPC is called by `Swap.parties.ln_payer`.
+
 The client sends a `CreateLightningPaymentRequest`:
 
 - `swap_id`: UUID string.
@@ -123,6 +149,8 @@ The server returns a `LightningPayment` containing:
 ### `CreateAssetClaim`
 
 Claims the Liquid HTLC (asset acquisition).
+
+This RPC is called by `Swap.parties.liquid_claimer`.
 
 The client sends a `CreateAssetClaimRequest`:
 
@@ -141,9 +169,9 @@ The current implementation uses UUID strings for ids.
 Note: The server updates swap status to `PAID` / `CLAIMED` only when `CreateLightningPayment` / `CreateAssetClaim`
 are executed (there is no background watcher in this minimal design).
 
-## Buyer Safety Checklist (Must Do)
+## Lightning Payer Safety Checklist (Must Do)
 
-Before paying `bolt11_invoice`, a buyer must verify:
+Before paying `bolt11_invoice`, the Lightning payer (`Swap.parties.ln_payer`) must verify:
 
 - The invoice payment hash matches `payment_hash`.
 - The invoice amount equals `Quote.total_price_msat`.
@@ -166,10 +194,12 @@ Example (plaintext gRPC):
 ```sh
 grpcurl \
   -plaintext \
+  -H "authorization: Bearer $SELLER_TOKEN" \
   -import-path proto \
   -import-path proto_deps \
   -proto proto/ln_liquid_swap/v1/swap.proto \
   -d '{
+    "direction": "SWAP_DIRECTION_LN_TO_LIQUID",
     "asset_id": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
     "asset_amount": 1000,
     "min_funding_confs": 1
@@ -179,17 +209,20 @@ grpcurl \
 
 grpcurl \
   -plaintext \
+  -H "authorization: Bearer $BUYER_TOKEN" \
   -import-path proto \
   -import-path proto_deps \
   -proto proto/ln_liquid_swap/v1/swap.proto \
   -d '{
-    "quote_id": "<QUOTE_ID>"
+    "quote_id": "<QUOTE_ID>",
+    "buyer_liquid_address": "<BUYER_LIQUID_ADDRESS>"
   }' \
   127.0.0.1:50051 \
   ln_liquid_swap.v1.SwapService/CreateSwap
 
 grpcurl \
   -plaintext \
+  -H "authorization: Bearer $BUYER_TOKEN" \
   -import-path proto \
   -import-path proto_deps \
   -proto proto/ln_liquid_swap/v1/swap.proto \
@@ -202,6 +235,7 @@ grpcurl \
 
 grpcurl \
   -plaintext \
+  -H "authorization: Bearer $BUYER_TOKEN" \
   -import-path proto \
   -import-path proto_deps \
   -proto proto/ln_liquid_swap/v1/swap.proto \
@@ -240,6 +274,8 @@ nix develop -c cargo run --bin swap_server -- \
   --store-path ./data/store.sqlite3 \
   --mnemonic "$MNEMONIC" \
   --slip77 "$SLIP77" \
+  --seller-token "$SELLER_TOKEN" \
+  --buyer-token "$BUYER_TOKEN" \
   --sell-asset-id "$ASSET_ID" \
   --price-msat-per-asset-unit 1000 \
   --fee-subsidy-sats 10000 \
@@ -252,14 +288,25 @@ CLI example:
 ```sh
 nix develop -c cargo run --bin swap_cli -- \
   --grpc-url http://127.0.0.1:50051 \
+  --auth-token "$SELLER_TOKEN" \
   create-quote \
+  --direction ln-to-liquid \
   --asset-id "$ASSET_ID" \
   --asset-amount 1000 \
   --min-funding-confs 1
+
+# In this minimal setup, use the `buyer_receive_address=...` logged by `swap_server`.
+nix develop -c cargo run --bin swap_cli -- \
+  --grpc-url http://127.0.0.1:50051 \
+  --auth-token "$BUYER_TOKEN" \
+  create-swap \
+  --quote-id "<QUOTE_ID>" \
+  --buyer-liquid-address "$BUYER_LIQUID_ADDRESS"
 ```
 
 ## Notes and Limitations
 
+- The current `swap_server` implementation supports `LN_TO_LIQUID` (submarine swap) only.
 - This implementation uses explicit (unblinded) HTLC outputs for simplicity.
 - This design is not fully atomic and is intended for controlled environments (for example: regtest).
 - Refund handling is best-effort and depends on the `swap_server` process being up.
