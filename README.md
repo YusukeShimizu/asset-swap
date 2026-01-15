@@ -5,7 +5,6 @@ This repository contains a minimal LN⇄Liquid swap implementation that combines
 
 - `LN_TO_LIQUID` (submarine swap): the seller funds a Liquid HTLC and creates an invoice; the buyer pays and claims.
 - `LIQUID_TO_LN` (reverse submarine swap): the buyer funds a Liquid HTLC and creates an invoice; the seller pays and claims.
-- The current `swap_server` implementation supports `LN_TO_LIQUID` (submarine swap) only.
 - Pricing is decided by the seller; the seller creates a quote via `CreateQuote` and shares `quote_id`.
   The buyer calls `CreateSwap(quote_id)`. The server rejects if the conditions changed after quoting.
 
@@ -34,7 +33,8 @@ nix develop -c just ci
 - gRPC server: `swap_server`
 - CLI: `swap_cli`
 
-See `docs/swap/ln-liquid-swap.mdx` for examples.
+See `docs/swap/ln-liquid-swap.mdx` for API examples.
+See `docs/swap/protocol-overview.mdx` for the full flow summary.
 
 ## Logging
 
@@ -64,7 +64,7 @@ E2E tests are `#[ignore]` and require external processes (run via `nix develop`)
 
 - LDK Server (Bitcoin regtest): `nix develop -c just e2e`
 - LWK (Liquid regtest): `nix develop -c just lwk_e2e`
-- LN→Liquid swap: `nix develop -c just swap_e2e`
+- LN⇄Liquid swaps: `nix develop -c just swap_e2e`
 
 To keep logs and working directories on failure, use `just e2e_keep` / `just lwk_e2e_keep`.
 
